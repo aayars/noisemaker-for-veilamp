@@ -1,0 +1,15 @@
+{
+  "name": "Noisemaker",
+  "version": "0.1.0",
+  "author": "Noise Factor LLC",
+  "description": "Noisemaker shows generative visuals that respond to audio.",
+  "entry": "index.js",
+  "permissions": [
+    "visualizer",
+    "player",
+    "panel"
+  ],
+  "panel": {
+    "title": "Noisemaker"
+  }
+}

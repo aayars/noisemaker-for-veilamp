@@ -1,0 +1,21 @@
+{
+  "name": "noisemaker-for-veilamp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generative audio visuals for Veilamp with Noisemaker.",
+  "author": "Noise Factor LLC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noisefactorllc/noisemaker-for-veilamp.git"
+  },
+  "homepage": "https://github.com/noisefactorllc/noisemaker-for-veilamp",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --experimental-vm-modules --test test/*.test.mjs",
+    "check": "node --check plugin/index.js && node --check test/veilamp.test.mjs"
+  }
+}

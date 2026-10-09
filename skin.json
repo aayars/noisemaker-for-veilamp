@@ -1,0 +1,5 @@
+{
+  "name": "Noisemaker",
+  "author": "Noise Factor LLC",
+  "css": "body > div { width:100%; min-width:0; max-width:100vw; }\n.shell .topbar { flex-wrap:wrap; gap:8px; }\n.shell .brand { margin-right:0; }\n.shell .topbar > .spacer { display:block; flex:1; min-width:80px; min-height:40px; }\n.shell .tabs { order:2; flex:1 1 100%; flex-wrap:wrap; justify-content:center; overflow:visible; border-radius:6px; }\n.shell .tab { padding:6px 10px; }\n.shell .content { min-width:0; }"
+}
