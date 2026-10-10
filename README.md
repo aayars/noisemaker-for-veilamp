@@ -37,15 +37,19 @@ The existing `visualizer` permission controls DSL access. No new buttons or perm
 
 When a friend streams your shared track, their plugin receives your current DSL and later program changes.
 The receiver renders the program locally and uses their received audio for `audio()` inputs.
-The transport sends DSL text and version markers. It does not send pixels, images, or audio analysis samples.
+The transport sends DSL text and version markers. A DSL comment carries the BPM and divider.
+It does not send pixels, images, or audio analysis samples.
 It uses Veilamp's signed private-route requests and requires an authorized friend and a shared track.
 Signed peer requests contain the requester identity and track ID.
 Seance is not a dependency.
 
-Dice selects a local program. The next sender program change applies automatically.
-TAP and the divider remain local controls.
-A temporary disconnect retains the last received visual.
-A different audio source restores the local visual until a shared program is available.
+The streamer controls Dice, TAP, and the divider.
+The listener's tray shows “Visuals currently controlled by peer.” It shows the streamer's current BPM and divider.
+All three buttons are gray and disabled for listeners. Keyboard shortcuts cannot change the peer's visual or timing.
+BPM and divider changes apply without recompiling unchanged effects.
+A temporary disconnect retains the last received visual and timing.
+Local playback restores the local visual and timing. It enables the controls again.
+Each peer uses its own playback samples and local clock. Matching settings do not guarantee identical frames.
 Disabling the plugin or removing its visualizer grant clears its outgoing program.
 The outgoing program stays in memory and has a 256 KiB limit.
 
@@ -73,7 +77,8 @@ Open the control tray with the button at the lower right.
 | TAP | Tap repeatedly to set the tempo. |
 | Divider | Tap to cycle through /1, /2, /4, /8, and /16. |
 
-The tempo starts at 140 BPM. The divider starts at /4.
+The local tempo starts at 140 BPM. The divider starts at /4.
+The tray shows the current BPM and divider. Listeners use the streamer's values.
 The loop duration is four beats multiplied by the divider.
 For example, /4 gives a loop of 16 beats.
 The keyboard shortcuts are R for randomize, T for tempo, and Escape to close the tray.
