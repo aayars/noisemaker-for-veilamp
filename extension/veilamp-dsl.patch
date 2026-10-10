@@ -1,0 +1,748 @@
+diff --git a/crates/veilamp-net/src/visual.rs b/crates/veilamp-net/src/visual.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/veilamp-net/src/visual.rs
+@@ -0,0 +1,173 @@
++// SPDX-License-Identifier: MPL-2.0
++// Store one bounded DSL program in memory. Never store pixels or media here.
++use std::sync::Mutex;
++
++pub const MAX_DSL_BYTES: usize = 256 * 1024;
++
++type VisualResult<T> = Result<T, &'static str>;
++
++struct Current {
++    epoch: [u8; 16],
++    revision: u64,
++    program: Option<(String, String)>,
++}
++
++pub struct VisualStore(Mutex<Current>);
++
++impl VisualStore {
++    pub fn new(epoch: [u8; 16]) -> Self {
++        Self(Mutex::new(Current { epoch, revision: 0, program: None }))
++    }
++
++    pub fn set(&self, owner: &str, dsl: &str) -> VisualResult<()> {
++        validate_dsl(dsl)?;
++        let mut current = self.0.lock().unwrap();
++        if current.program.as_ref().is_some_and(|(id, text)| id == owner && text == dsl) {
++            return Ok(());
++        }
++        current.revision = current.revision.checked_add(1).ok_or("Visual revision limit reached.")?;
++        current.program = Some((owner.to_owned(), dsl.to_owned()));
++        Ok(())
++    }
++
++    pub fn clear(&self, owner: &str) {
++        let mut current = self.0.lock().unwrap();
++        if current.program.as_ref().is_some_and(|(id, _)| id == owner) {
++            current.program = None;
++        }
++    }
++
++    pub fn status(&self, shared: bool) -> VisualResult<Option<String>> {
++        if !shared { return Err("The track is not shared."); }
++        let current = self.0.lock().unwrap();
++        Ok(current.program.as_ref().map(|_| version(&current)))
++    }
++
++    pub fn chunk(&self, shared: bool, expected: &str, offset: usize, want: usize) -> VisualResult<(usize, Vec<u8>)> {
++        if !shared { return Err("The track is not shared."); }
++        let current = self.0.lock().unwrap();
++        if !valid_version(expected) || expected != version(&current) {
++            return Err("The visual program changed.");
++        }
++        let (_, dsl) = current.program.as_ref().ok_or("No visual program is available.")?;
++        if offset >= dsl.len() || want == 0 { return Err("The visual range is invalid."); }
++        let end = offset.saturating_add(want).min(dsl.len());
++        Ok((dsl.len(), dsl.as_bytes()[offset..end].to_vec()))
++    }
++}
++
++fn version(current: &Current) -> String {
++    let epoch: String = current.epoch.iter().map(|b| format!("{b:02x}")).collect();
++    format!("{epoch}{:016x}", current.revision)
++}
++
++pub fn valid_version(value: &str) -> bool {
++    value.len() == 48 && value.bytes().all(|b| b.is_ascii_hexdigit())
++}
++
++pub fn validate_dsl(dsl: &str) -> VisualResult<()> {
++    if dsl.trim().is_empty() || dsl.len() > MAX_DSL_BYTES || dsl.contains('\0') || dsl.to_ascii_lowercase().contains("data:") {
++        return Err("The DSL program is invalid or exceeds 256 KiB.");
++    }
++    Ok(())
++}
++
++pub struct VisualDownload {
++    total: usize,
++    bytes: Vec<u8>,
++}
++
++impl VisualDownload {
++    pub fn new(total: usize) -> VisualResult<Self> {
++        if total == 0 || total > MAX_DSL_BYTES { return Err("The visual program size is invalid."); }
++        Ok(Self { total, bytes: Vec::with_capacity(total) })
++    }
++
++    pub fn offset(&self) -> usize { self.bytes.len() }
++    pub fn complete(&self) -> bool { self.bytes.len() == self.total }
++
++    pub fn append(&mut self, total: usize, data: &[u8]) -> VisualResult<()> {
++        if total != self.total || data.is_empty() || data.len() > 28 * 1024 || self.bytes.len().saturating_add(data.len()) > self.total {
++            return Err("The visual program chunk is invalid.");
++        }
++        self.bytes.extend_from_slice(data);
++        Ok(())
++    }
++
++    pub fn finish(self) -> VisualResult<String> {
++        if self.bytes.len() != self.total { return Err("The visual program is incomplete."); }
++        let dsl = String::from_utf8(self.bytes).map_err(|_| "The visual program is not UTF-8.")?;
++        validate_dsl(&dsl)?;
++        Ok(dsl)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn changing_the_program_invalidates_old_chunks() {
++        let store = VisualStore::new([1; 16]);
++        store.set("noisemaker", "noise().write(o0)").unwrap();
++        let first = store.status(true).unwrap().unwrap();
++        assert_eq!(store.chunk(true, &first, 0, 7).unwrap().1, b"noise()");
++        store.set("noisemaker", "voronoi().write(o0)").unwrap();
++        assert!(store.chunk(true, &first, 7, 7).is_err());
++        assert_ne!(store.status(true).unwrap().unwrap(), first);
++    }
++
++    #[test]
++    fn only_shared_tracks_expose_a_program() {
++        let store = VisualStore::new([1; 16]);
++        store.set("noisemaker", "noise()").unwrap();
++        let version = store.status(true).unwrap().unwrap();
++        assert!(store.status(false).is_err());
++        assert!(store.chunk(false, &version, 0, 7).is_err());
++    }
++
++    #[test]
++    fn invalid_programs_do_not_replace_the_current_program() {
++        let store = VisualStore::new([1; 16]);
++        store.set("noisemaker", "noise()").unwrap();
++        let version = store.status(true).unwrap();
++        for invalid in ["".to_string(), " ".to_string(), "x".repeat(MAX_DSL_BYTES + 1), "data:image/png;base64,x".to_string()] {
++            assert!(store.set("noisemaker", &invalid).is_err());
++            assert_eq!(store.status(true).unwrap(), version);
++        }
++    }
++
++    #[test]
++    fn a_plugin_cannot_clear_another_plugins_program() {
++        let store = VisualStore::new([1; 16]);
++        store.set("noisemaker", "noise()").unwrap();
++        store.clear("other");
++        assert!(store.status(true).unwrap().is_some());
++        store.clear("noisemaker");
++        assert!(store.status(true).unwrap().is_none());
++    }
++
++    #[test]
++    fn versions_do_not_repeat_after_a_restart() {
++        let first = VisualStore::new([1; 16]);
++        let next = VisualStore::new([2; 16]);
++        first.set("n", "noise()").unwrap();
++        next.set("n", "noise()").unwrap();
++        assert_ne!(first.status(true).unwrap(), next.status(true).unwrap());
++    }
++
++    #[test]
++    fn a_download_rejects_oversize_truncated_and_mixed_snapshots() {
++        assert!(VisualDownload::new(MAX_DSL_BYTES + 1).is_err());
++        let mut download = VisualDownload::new(7).unwrap();
++        download.append(7, b"noise").unwrap();
++        assert!(download.append(8, b"()").is_err());
++        assert!(download.append(7, b"").is_err());
++        assert!(download.append(7, b"abc").is_err());
++        assert!(download.finish().is_err());
++        let mut download = VisualDownload::new(7).unwrap();
++        download.append(7, b"noise").unwrap();
++        download.append(7, b"()").unwrap();
++        assert_eq!(download.finish().unwrap(), "noise()");
++    }
++}
+diff --git a/crates/veilamp-net/src/protocol.rs b/crates/veilamp-net/src/protocol.rs
+--- a/crates/veilamp-net/src/protocol.rs
++++ b/crates/veilamp-net/src/protocol.rs
+@@ -28,6 +28,8 @@
+     /// Shared playlists (#861), a JSON blob of playlists with their tracks.
+     /// Additive: peers on older builds don't request or serve it.
+     Playlists,
++    VisualStatus { track_id: i64 },
++    VisualProgram { track_id: i64, version: String },
+ }
+ 
+ impl Resource {
+@@ -38,6 +40,8 @@
+             Resource::Art { track_id } => format!("art:{track_id}"),
+             Resource::Track { track_id } => format!("track:{track_id}"),
+             Resource::Playlists => "playlists".to_string(),
++            Resource::VisualStatus { track_id } => format!("visual-status:v1:{track_id}"),
++            Resource::VisualProgram { track_id, version } => format!("visual-program:v1:{track_id}:{version}"),
+         }
+     }
+ }
+diff --git a/crates/veilamp-net/src/client.rs b/crates/veilamp-net/src/client.rs
+--- a/crates/veilamp-net/src/client.rs
++++ b/crates/veilamp-net/src/client.rs
+@@ -432,3 +432,41 @@
+     let sig: Signature = vld0.sign(pubkey, secret, payload)?;
+     Ok(sig.to_string())
+ }
++
++// Fetch a version first. Each program chunk must belong to that version.
++pub async fn fetch_visual_program(net: &Net, friend: &str, track_id: i64, known: Option<&str>) -> Result<(Option<String>, Option<String>)> {
++    use crate::visual::{valid_version, VisualDownload};
++    let presence = friend_presence_key(&net.table, friend).await?;
++    let (target, _) = resolve_route_by_presence(&net.api, &net.rc, &presence).await?;
++    let requester = net.identity.public_key.to_string();
++    let pubkey = &net.identity.public_key;
++    let secret = net.identity.keypair.secret();
++    let timeout = Duration::from_secs(5);
++    let response = signed_request(&net.api, &net.rc, &requester, pubkey, &secret, &target,
++        &Resource::VisualStatus { track_id }, 0, timeout, None).await?;
++    let version = match response {
++        Response::Ok { total_len: 0, data } if data.is_empty() => return Ok((None, None)),
++        Response::Ok { total_len: 48, data } if data.len() == 48 => String::from_utf8(data)?,
++        Response::Err(e) => return Err(anyhow!(e)),
++        _ => return Err(anyhow!("The visual version is invalid.")),
++    };
++    if !valid_version(&version) { return Err(anyhow!("The visual version is invalid.")); }
++    if known == Some(version.as_str()) { return Ok((Some(version), None)); }
++    let resource = Resource::VisualProgram { track_id, version: version.clone() };
++    let mut download: Option<VisualDownload> = None;
++    loop {
++        let offset = download.as_ref().map_or(0, VisualDownload::offset) as u32;
++        match signed_request(&net.api, &net.rc, &requester, pubkey, &secret, &target, &resource, offset, timeout, None).await? {
++            Response::Ok { total_len, data } => {
++                let total = total_len as usize;
++                if download.is_none() { download = Some(VisualDownload::new(total).map_err(|e| anyhow!(e))?); }
++                let buffer = download.as_mut().unwrap();
++                buffer.append(total, &data).map_err(|e| anyhow!(e))?;
++                if buffer.complete() { break; }
++            }
++            Response::Err(e) => return Err(anyhow!(e)),
++        }
++    }
++    let dsl = download.unwrap().finish().map_err(|e| anyhow!(e))?;
++    Ok((Some(version), Some(dsl)))
++}
+diff --git a/crates/veilamp-net/src/node.rs b/crates/veilamp-net/src/node.rs
+--- a/crates/veilamp-net/src/node.rs
++++ b/crates/veilamp-net/src/node.rs
+@@ -134,6 +134,16 @@
+     /// Boot the node, attach, load/create identity, publish presence, and start
+     /// serving friend requests. Blocks until public-internet ready (15-60s).
+     pub async fn boot(state_dir: &Path, catalog: Arc<dyn Catalog>) -> Result<Arc<Net>> {
++        Self::boot_with_visuals(state_dir, catalog, Self::new_visual_store()?).await
++    }
++
++    pub fn new_visual_store() -> Result<Arc<crate::visual::VisualStore>> {
++        let mut epoch = [0; 16];
++        getrandom::fill(&mut epoch).map_err(|e| anyhow!("Cannot create a visual session: {e}"))?;
++        Ok(Arc::new(crate::visual::VisualStore::new(epoch)))
++    }
++
++    pub async fn boot_with_visuals(state_dir: &Path, catalog: Arc<dyn Catalog>, visuals: Arc<crate::visual::VisualStore>) -> Result<Arc<Net>> {
+         let (att_tx, mut att_rx) = watch::channel(false);
+         let (call_tx, mut call_rx) = mpsc::unbounded_channel();
+ 
+@@ -198,6 +208,7 @@
+             let guard = guard.clone();
+             let share_secret = share_secret.clone();
+             let serve_activity = serve_activity.clone();
++            let visuals = visuals.clone();
+             tokio::spawn(async move {
+                 while let Some(call) = call_rx.recv().await {
+                     let api = api.clone();
+@@ -206,12 +217,13 @@
+                     let blob_cache = blob_cache.clone();
+                     let guard = guard.clone();
+                     let serve_activity = serve_activity.clone();
++                    let visuals = visuals.clone();
+                     // Snapshot the current secret so a mid-flight rotation takes
+                     // effect on the next request (revoking outstanding codes).
+                     let secret = share_secret.lock().unwrap().clone();
+                     tokio::spawn(async move {
+                         server::handle_call(
+-                            &api, &table, &catalog, &blob_cache, &guard, secret, &serve_activity, call,
++                            &api, &table, &catalog, &blob_cache, &guard, secret, &serve_activity, &visuals, call,
+                         )
+                         .await;
+                     });
+@@ -261,6 +273,10 @@
+             share_secret,
+             serve_activity,
+         }))
++    }
++
++    pub async fn fetch_visual_program(&self, friend: &str, track_id: i64, known: Option<&str>) -> Result<(Option<String>, Option<String>)> {
++        client::fetch_visual_program(self, friend, track_id, known).await
+     }
+ 
+     pub fn identity_info(&self) -> IdentityInfo {
+diff --git a/crates/veilamp-net/src/server.rs b/crates/veilamp-net/src/server.rs
+--- a/crates/veilamp-net/src/server.rs
++++ b/crates/veilamp-net/src/server.rs
+@@ -45,6 +45,7 @@
+     guard: &RequestGuard,
+     share_secret: Option<String>,
+     serve_activity: &ServeActivity,
++    visuals: &Arc<crate::visual::VisualStore>,
+     call: VeilidAppCall,
+ ) {
+     let reply = match build_reply(
+@@ -55,6 +56,7 @@
+         guard,
+         share_secret.as_deref(),
+         serve_activity,
++        visuals,
+         call.message(),
+     )
+     .await
+@@ -79,6 +81,7 @@
+     guard: &RequestGuard,
+     share_secret: Option<&str>,
+     serve_activity: &ServeActivity,
++    visuals: &Arc<crate::visual::VisualStore>,
+     msg: &[u8],
+ ) -> Result<Vec<u8>> {
+     // A friend request comes from someone who isn't a friend yet, so it's
+@@ -110,6 +113,10 @@
+     };
+     if !is_friend && !has_valid_secret {
+         bail!("not authorized");
++    }
++
++    if matches!(req.resource, Resource::VisualStatus { .. } | Resource::VisualProgram { .. }) && !is_friend {
++        bail!("Visual programs require an authorized friend.");
+     }
+ 
+     // 3. Signature must verify against the requester's identity key.
+@@ -147,6 +154,7 @@
+     };
+     let catalog = catalog.clone();
+     let blob_cache = blob_cache.clone();
++    let visuals = visuals.clone();
+ 
+     let permit = match &resource {
+         Resource::Track { .. } => Some(
+@@ -160,6 +168,15 @@
+ 
+     let reply = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+         match &resource {
++            Resource::VisualStatus { track_id } => {
++                let version = visuals.status(catalog.track_len(*track_id).is_some()).map_err(|e| anyhow!(e))?;
++                let bytes = version.unwrap_or_default().into_bytes();
++                Ok(encode_ok(bytes.len() as u32, &bytes))
++            }
++            Resource::VisualProgram { track_id, version } => {
++                let (total, bytes) = visuals.chunk(catalog.track_len(*track_id).is_some(), version, offset, want).map_err(|e| anyhow!(e))?;
++                Ok(encode_ok(total as u32, &bytes))
++            }
+             // Large audio files are served by range so they're never fully loaded.
+             Resource::Track { track_id } => {
+                 let total = catalog
+diff --git a/crates/veilamp-net/src/lib.rs b/crates/veilamp-net/src/lib.rs
+--- a/crates/veilamp-net/src/lib.rs
++++ b/crates/veilamp-net/src/lib.rs
+@@ -29,3 +29,5 @@
+ pub use node::{Net, NetStatus, VeilidStats};
+ pub use share::{decode_server_code, encode_server_code, generate_secret, ServerCodeParts};
+ pub use stream::{StreamControl, StreamReader, StreamStats};
++
++pub mod visual;
+diff --git a/app/veilamp/src-tauri/src/visuals.rs b/app/veilamp/src-tauri/src/visuals.rs
+new file mode 100644
+--- /dev/null
++++ b/app/veilamp/src-tauri/src/visuals.rs
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: MPL-2.0
++// Exchange DSL through the current friend's existing private route.
++use std::sync::Arc;
++use serde::Serialize;
++use tauri::State;
++use veilamp_net::{node::Net, visual::VisualStore};
++use crate::{AppState, NetState, QueueItem};
++
++pub struct VisualState(pub Arc<VisualStore>);
++
++#[derive(Serialize)]
++pub struct VisualProgram {
++    source: Option<String>,
++    version: Option<String>,
++    dsl: Option<String>,
++    available: bool,
++}
++
++#[derive(PartialEq)]
++struct Source { epoch: u64, index: usize, friend: String, track: i64 }
++
++fn source(state: &AppState) -> Option<Source> {
++    let queue = state.queue.lock().unwrap();
++    match queue.items.get(queue.index) {
++        Some(QueueItem::Remote(entry)) => Some(Source {
++            epoch: queue.epoch, index: queue.index, friend: entry.friend_key.clone(), track: entry.track_id,
++        }),
++        _ => None,
++    }
++}
++
++#[tauri::command]
++pub fn get_visual_source(state: State<AppState>) -> Option<String> {
++    source(&state).map(|s| format!("{}:{}", s.epoch, s.index))
++}
++
++#[tauri::command]
++pub fn set_visual_program(state: State<VisualState>, id: String, dsl: String) -> Result<(), String> {
++    state.0.set(&id, &dsl).map_err(str::to_string)
++}
++
++#[tauri::command]
++pub fn clear_visual_program(state: State<VisualState>, id: String) {
++    state.0.clear(&id);
++}
++
++#[tauri::command]
++pub async fn get_visual_program(state: State<'_, AppState>, net: State<'_, NetState>, known_source: Option<String>, known_version: Option<String>) -> Result<VisualProgram, String> {
++    let Some(start) = source(&state) else {
++        return Ok(VisualProgram { source: None, version: None, dsl: None, available: true });
++    };
++    let token = format!("{}:{}", start.epoch, start.index);
++    let handle: Arc<Net> = match crate::net_handle(&net) {
++        Ok(handle) => handle,
++        Err(_) => return Ok(VisualProgram { source: Some(token), version: None, dsl: None, available: false }),
++    };
++    let known = if known_source.as_deref() == Some(token.as_str()) { known_version.as_deref() } else { None };
++    let received = tokio::time::timeout(std::time::Duration::from_secs(20), handle.fetch_visual_program(&start.friend, start.track, known))
++        .await;
++    if source(&state).as_ref() != Some(&start) { return Err("The audio source changed.".to_string()); }
++    let (version, dsl) = match received {
++        Ok(Ok(program)) => program,
++        _ => return Ok(VisualProgram { source: Some(token), version: None, dsl: None, available: false }),
++    };
++    Ok(VisualProgram { source: Some(token), version, dsl, available: true })
++}
+diff --git a/app/veilamp/src-tauri/src/lib.rs b/app/veilamp/src-tauri/src/lib.rs
+--- a/app/veilamp/src-tauri/src/lib.rs
++++ b/app/veilamp/src-tauri/src/lib.rs
+@@ -37,6 +37,7 @@
+ pub mod inhibit;
+ pub mod netmd;
+ pub mod plugins;
++mod visuals;
+ pub mod radio;
+ pub mod scrobble;
+ pub mod server_client;
+@@ -5079,13 +5080,14 @@
+ /// still attaching, the freshly-booted node is torn right back down.
+ fn spawn_net_boot(handle: tauri::AppHandle, net_dir: std::path::PathBuf, catalog: Arc<dyn Catalog>) {
+     handle.state::<NetControl>().booting.store(true, Ordering::Relaxed);
++    let visuals = handle.state::<visuals::VisualState>().0.clone();
+     tauri::async_runtime::spawn(async move {
+         {
+             let inner = handle.state::<NetState>();
+             inner.inner.lock().unwrap().status = NetStatus::connecting();
+         }
+         let _ = handle.emit("net_status", NetStatus::connecting());
+-        let status = match Net::boot(&net_dir, catalog).await {
++        let status = match Net::boot_with_visuals(&net_dir, catalog, visuals).await {
+             Ok(net) => {
+                 let still_full = handle.state::<NetControl>().mode().veilid_enabled();
+                 if still_full {
+@@ -6858,6 +6860,7 @@
+             let mode_path = data_dir.join("network_mode.json");
+             let mode = NetControl::load(&mode_path);
+ 
++            app.manage(visuals::VisualState(Net::new_visual_store()?));
+             app.manage(NetState {
+                 inner: Mutex::new(NetInner {
+                     net: None,
+@@ -6891,6 +6894,10 @@
+             Ok(())
+         })
+         .invoke_handler(tauri::generate_handler![
++            visuals::set_visual_program,
++            visuals::clear_visual_program,
++            visuals::get_visual_program,
++            visuals::get_visual_source,
+             scan_library,
+             analyze_loudness,
+             get_library,
+diff --git a/app/veilamp/src/lib/api.ts b/app/veilamp/src/lib/api.ts
+--- a/app/veilamp/src/lib/api.ts
++++ b/app/veilamp/src/lib/api.ts
+@@ -1936,3 +1936,19 @@
+ export function streamStats(): Promise<StreamStats | null> {
+   return invoke<StreamStats | null>("stream_stats");
+ }
++
++// The host binds visual requests to the current friend's audio source.
++export interface VisualProgram { source: string | null; version: string | null; dsl: string | null; available: boolean }
++export function setVisualProgram(id: string, dsl: string): Promise<void> {
++  return invoke("set_visual_program", { id, dsl });
++}
++export function clearVisualProgram(id: string): Promise<void> {
++  return invoke("clear_visual_program", { id });
++}
++export function getVisualProgram(knownSource: string | null, knownVersion: string | null): Promise<VisualProgram> {
++  return invoke("get_visual_program", { knownSource, knownVersion });
++}
++
++export function getVisualSource(): Promise<string | null> {
++  return invoke("get_visual_source");
++}
+diff --git a/app/veilamp/src/lib/plugins/protocol.ts b/app/veilamp/src/lib/plugins/protocol.ts
+--- a/app/veilamp/src/lib/plugins/protocol.ts
++++ b/app/veilamp/src/lib/plugins/protocol.ts
+@@ -116,6 +116,11 @@
+       nowPlaying: function () { return call("player.nowPlaying"); },
+       art: function () { return call("player.art"); }
+     },
++    visualizer: {
++      source: function () { return call("visualizer.source"); },
++      setProgram: function (dsl) { return call("visualizer.setProgram", [dsl]); },
++      program: function (source, version) { return call("visualizer.program", [source || null, version || null]); }
++    },
+     library: {
+       count: function (q) { return call("library.count", [q || {}]); },
+       ids: function (q) { return call("library.ids", [q || {}]); },
+diff --git a/app/veilamp/src/lib/plugins/host.svelte.ts b/app/veilamp/src/lib/plugins/host.svelte.ts
+--- a/app/veilamp/src/lib/plugins/host.svelte.ts
++++ b/app/veilamp/src/lib/plugins/host.svelte.ts
+@@ -63,6 +63,17 @@
+   error = $state<string | null>(null);
+ 
+   private live = new Map<string, Live>();
++  private visualWrites = new Map<string, Promise<void>>();
++
++  private updateVisual(id: string, write: () => Promise<void>): Promise<void> {
++    const pending = (this.visualWrites.get(id) ?? Promise.resolve()).catch(() => {}).then(write);
++    this.visualWrites.set(id, pending);
++    return pending.finally(() => { if (this.visualWrites.get(id) === pending) this.visualWrites.delete(id); });
++  }
++
++  private clearVisual(id: string): Promise<void> {
++    return this.updateVisual(id, () => api.clearVisualProgram(id));
++  }
+   // Slots by plugin id (a custom layout's `plugin` node, the Visualizer's
+   // plugin modes). A headless plugin with a slot runs visibly inside the most
+   // recently registered one instead of parked off-screen; when that slot goes
+@@ -135,7 +146,7 @@
+     // Tear down any live iframe whose plugin vanished or is now disabled.
+     const keepIds = new Set(next.filter((r) => r.enabled).map((r) => r.manifest.id));
+     for (const id of [...this.live.keys()]) {
+-      if (!keepIds.has(id)) this.unmount(id);
++      if (!keepIds.has(id)) { this.unmount(id); await this.clearVisual(id); }
+     }
+     this.runtimes = next;
+     // Only park *headless* (no-panel) plugins off-screen here. Panel plugins are
+@@ -349,16 +360,16 @@
+     const reply = (ok: boolean, value?: unknown, error?: string) =>
+       this.postTo(live, { __vch: CH, type: "result", id, ok, value, error });
+     try {
+-      const value = await this.exec(rt, method, args);
++      const value = await this.exec(rt, method, args, live);
+       reply(true, value);
+     } catch (err) {
+       reply(false, undefined, err instanceof Error ? err.message : String(err));
+     }
+   }
+ 
+-  private async exec(rt: PluginRuntime, method: string, args: unknown[]): Promise<unknown> {
++  private async exec(rt: PluginRuntime, method: string, args: unknown[], live: Live): Promise<unknown> {
+     const need = (perm: string) => {
+-      if (!this.has(rt, perm)) throw new Error(`permission "${perm}" not granted`);
++      if (!rt.enabled || !this.has(rt, perm)) throw new Error(`permission "${perm}" not granted`);
+     };
+     // Read-only now-playing access: either "player" or "visualizer" (qs#1062).
+     const needMeta = () => {
+@@ -397,6 +408,22 @@
+       case "player.art":
+         needMeta();
+         return this.nowPlayingArt ? this.nowPlayingArt() : null;
++      case "visualizer.setProgram": {
++        need("visualizer");
++        if (typeof args[0] !== "string") throw new Error("The visual program must be DSL text.");
++        const dsl = args[0];
++        return this.updateVisual(rt.manifest.id, async () => {
++          const current = this.runtimes.find((r) => r.manifest.id === rt.manifest.id);
++          if (!current?.enabled || !this.has(current, "visualizer") || this.live.get(rt.manifest.id) !== live) return;
++          await api.setVisualProgram(rt.manifest.id, dsl);
++        });
++      }
++      case "visualizer.source":
++        need("visualizer");
++        return api.getVisualSource();
++      case "visualizer.program":
++        need("visualizer");
++        return api.getVisualProgram(typeof args[0] === "string" ? args[0] : null, typeof args[1] === "string" ? args[1] : null);
+       case "library.count":
+         need("library");
+         return api.libraryCount((args[0] as Record<string, unknown>) ?? {});
+@@ -501,14 +528,13 @@
+     rt.enabled = enabled;
+     this.runtimes = [...this.runtimes];
+     this.persist();
+-    // Panel plugins are created/destroyed by their PluginMount as they enter/
+-    // leave `panels`; only headless ones are parked/torn down here.
+-    if (rt.manifest.panel) {
+-      if (!enabled) this.unmount(id);
+-    } else if (enabled) {
++    // Remove the old iframe before waiting for its pending native writes.
++    // A later enable can mount a new iframe while the clear is pending.
++    if (!enabled) {
++      this.unmount(id);
++      await this.clearVisual(id);
++    } else if (!rt.manifest.panel) {
+       await this.mount(rt);
+-    } else {
+-      this.unmount(id);
+     }
+   }
+ 
+@@ -518,6 +544,7 @@
+     rt.trusted = trusted;
+     this.runtimes = [...this.runtimes];
+     this.persist();
++    if (!this.has(rt, "visualizer")) await this.clearVisual(id);
+     this.reloadForCaps(rt);
+   }
+ 
+@@ -530,6 +557,7 @@
+     rt.granted = [...set];
+     this.runtimes = [...this.runtimes];
+     this.persist();
++    if (!this.has(rt, "visualizer")) await this.clearVisual(id);
+     this.reloadForCaps(rt);
+   }
+ 
+@@ -547,6 +575,9 @@
+   }
+ 
+   async remove(id: string): Promise<void> {
++    const rt = this.runtimes.find((r) => r.manifest.id === id);
++    if (rt) rt.enabled = false;
++    await this.clearVisual(id);
+     this.unmount(id);
+     try {
+       await api.removePlugin(id);
+diff --git a/app/veilamp/test/visual-sharing.test.mjs b/app/veilamp/test/visual-sharing.test.mjs
+new file mode 100644
+--- /dev/null
++++ b/app/veilamp/test/visual-sharing.test.mjs
+@@ -0,0 +1,99 @@
++// SPDX-License-Identifier: MPL-2.0
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { readFile } from 'node:fs/promises'
++import { createContext, SourceTextModule, SyntheticModule, Script } from 'node:vm'
++import ts from 'typescript'
++import { compileModule } from 'svelte/compiler'
++import * as svelte from 'svelte/internal/client'
++
++async function boot() {
++  const calls = []
++  const storage = new Map()
++  const context = createContext({ console, Map, Set,
++    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) }
++  })
++  let hostMessage
++  let pluginMessage
++  let iframe
++  context.window = { addEventListener(name, fn) { if (name === 'message') hostMessage = fn } }
++  context.document = {
++    body: { appendChild() {} },
++    createElement(tag) {
++      const element = { dataset: {}, style: {}, setAttribute() {}, remove() {} }
++      if (tag === 'iframe') { iframe = element; element.contentWindow = { postMessage(data) { pluginMessage?.({ data }) } } }
++      return element
++    }
++  }
++  const moduleFor = (values) => new SyntheticModule(Object.keys(values), function () {
++    for (const [name, value] of Object.entries(values)) this.setExport(name, value)
++  }, { context })
++  const protocol = new SourceTextModule(ts.transpileModule(await readFile('src/lib/plugins/protocol.ts', 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } }).outputText, { context })
++  await protocol.link(() => {}); await protocol.evaluate()
++  let blockedWrite
++  const api = moduleFor({
++    listPlugins: async () => [{ id: 'noisemaker', name: 'Noisemaker', entry: 'index.js', permissions: ['visualizer'], panel: { title: 'Noisemaker' } }],
++    readPluginFile: async () => '',
++    setVisualProgram: async (id, dsl) => { calls.push(['set', id, dsl]); await blockedWrite },
++    clearVisualProgram: async id => { calls.push(['clear', id]) },
++    getVisualSource: async () => "1:0",
++    getVisualProgram: async (source, version) => { calls.push(['get', source, version]); return { source: '1:0', version: 'a', dsl: 'noise()', available: true } }
++  })
++  const modules = { '$lib/api': api, '@tauri-apps/plugin-dialog': moduleFor({ open: () => null }), '$lib/themes': moduleFor({ THEMABLE_KEYS: [] }), './protocol': protocol, 'svelte/internal/client': moduleFor(svelte) }
++  const stripped = ts.transpileModule(await readFile('src/lib/plugins/host.svelte.ts', 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } }).outputText
++  const hostModule = new SourceTextModule(compileModule(stripped, { filename: 'host.svelte.js', generate: 'client' }).js.code, { context })
++  await hostModule.link(name => { assert.ok(modules[name], `Unexpected module ${name}`); return modules[name] })
++  await hostModule.evaluate()
++  const host = hostModule.namespace.pluginHost
++  await host.start()
++  await host.setEnabled('noisemaker', true)
++  await host.attach('noisemaker', { appendChild() {} })
++  const pluginContext = createContext({ console, Map, Set, Error,
++    window: { addEventListener(name, fn) { if (name === 'message') pluginMessage = fn } },
++    parent: { postMessage(data) { hostMessage({ data, source: iframe.contentWindow }) } }
++  })
++  new Script(protocol.namespace.RUNTIME_SHIM).runInContext(pluginContext)
++  return { host, calls, get plugin() { return pluginContext.window.veilamp }, ready() { new Script(protocol.namespace.RUNTIME_SHIM).runInContext(pluginContext) }, block(promise) { blockedWrite = promise } }
++}
++
++test('The sandbox binds DSL writes to its plugin id and uses the existing visualizer grant', async () => {
++  const app = await boot()
++  await app.plugin.visualizer.setProgram('noise()')
++  await app.plugin.visualizer.program('1:0', 'a')
++  assert.deepEqual(app.calls, [['set', 'noisemaker', 'noise()'], ['get', '1:0', 'a']])
++  await app.host.setGranted('noisemaker', 'visualizer', false)
++  assert.deepEqual(app.calls.at(-1), ['clear', 'noisemaker'])
++  await assert.rejects(app.plugin.visualizer.setProgram('voronoi()'), /not granted/)
++})
++
++test('Disabling a plugin clears a write that was already in flight', async () => {
++  const app = await boot()
++  let finish
++  app.block(new Promise(resolve => { finish = resolve }))
++  const write = app.plugin.visualizer.setProgram('noise()')
++  await new Promise(resolve => setImmediate(resolve))
++  const disable = app.host.setEnabled('noisemaker', false)
++  finish()
++  await Promise.all([write, disable])
++  assert.deepEqual(app.calls, [['set', 'noisemaker', 'noise()'], ['clear', 'noisemaker']])
++})
++
++
++test('A pending disable cannot stop a newly enabled plugin', async () => {
++  const app = await boot()
++  let finish
++  app.block(new Promise(resolve => { finish = resolve }))
++  const write = app.plugin.visualizer.setProgram('noise()')
++  await new Promise(resolve => setImmediate(resolve))
++  const disable = app.host.setEnabled('noisemaker', false)
++  await app.host.setEnabled('noisemaker', true)
++  await app.host.attach('noisemaker', { appendChild() {} })
++  finish()
++  await Promise.all([write, disable])
++  app.ready()
++  const runtime = app.host.runtimes.find(item => item.manifest.id === 'noisemaker')
++  assert.equal(runtime.enabled, true)
++  assert.equal(runtime.status, 'running')
++  await app.plugin.visualizer.setProgram('voronoi()')
++  assert.deepEqual(app.calls, [['set', 'noisemaker', 'noise()'], ['clear', 'noisemaker'], ['set', 'noisemaker', 'voronoi()']])
++})

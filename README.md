@@ -29,6 +29,40 @@ The plugin needs internet access to load the runtime, shader assets, and program
 The files run directly in Veilamp. You can import the files without a build step.
 We checked the native integration with Veilamp 0.3.6 on macOS.
 
+## Visuals with friend streams
+
+The optional Veilamp source extension adds automatic DSL sharing.
+Both peers need this extension and the Noisemaker plugin enabled.
+The existing `visualizer` permission controls DSL access. No new buttons or permissions are required.
+
+When a friend streams your shared track, their plugin receives your current DSL and later program changes.
+The receiver renders the program locally and uses their received audio for `audio()` inputs.
+The transport sends DSL text and version markers. It does not send pixels, images, or audio analysis samples.
+It uses Veilamp's signed private-route requests and requires an authorized friend and a shared track.
+Signed peer requests contain the requester identity and track ID.
+Seance is not a dependency.
+
+Dice selects a local program. The next sender program change applies automatically.
+TAP and the divider remain local controls.
+A temporary disconnect retains the last received visual.
+A different audio source restores the local visual until a shared program is available.
+Disabling the plugin or removing its visualizer grant clears its outgoing program.
+The outgoing program stays in memory and has a 256 KiB limit.
+
+Standard Veilamp builds keep the plugin's local visuals and audio response.
+They need the source extension to share DSL.
+
+To build Veilamp with the extension:
+
+1. Get the official [Veilamp source](https://gitlab.com/wrewtopia-labs-group/veilamp).
+2. Check the patch with `python3 extension/apply.py --check /path/to/veilamp`.
+3. Apply it with `python3 extension/apply.py /path/to/veilamp`.
+4. Follow Veilamp's build instructions. Enable `custom-protocol` for a standalone desktop binary.
+5. Import this repository's `plugin` folder into each peer. Enable Noisemaker with the existing grants.
+
+The patch targets the Veilamp 0.3.6 source and includes native transport and sandbox tests.
+The Veilamp extension follows upstream MPL-2.0 licensing. This repository's plugin and application script use MIT.
+
 ## Controls
 
 Open the control tray with the button at the lower right.
@@ -80,7 +114,7 @@ The plugin sends read-only HTTPS requests to these Noise Factor services:
 - `shaders.noisedeck.app` provides the Noisemaker browser runtime and the current version 1 shader manifest. It also provides effect bundles or shader assets for the selected program.
 - `blaster.noisedeck.app` provides public program lists and the DSL for selected programs. The plugin may request more catalog pages. It may try another program if a candidate is incompatible.
 
-The plugin does not send Veilamp audio samples, track titles, artist names, library files, or account identifiers in request URLs or bodies.
+These HTTPS requests do not include Veilamp audio samples, track titles, artist names, library files, or account identifiers.
 It uses audio samples locally to set Noisemaker `audio()` inputs.
 It uses playback identifiers and radio or CD metadata locally to detect track changes.
 

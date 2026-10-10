@@ -90,6 +90,106 @@
   let taps = []
   let tempoBpm = 140
   let tempoDivider = 4
+  let localProgram = null
+  let sharedSource = null
+  let sharedVersion = null
+  let showingShared = false
+  let visualGeneration = 0
+  let compileQueue = Promise.resolve()
+  let polling = false
+
+  const sharing = () => veilamp.caps.visualizer &&
+    typeof veilamp.visualizer?.setProgram === 'function' &&
+    typeof veilamp.visualizer?.program === 'function' &&
+    typeof veilamp.visualizer?.source === 'function'
+
+  function compileProgram(dsl, current = () => true) {
+    const task = compileQueue.catch(() => {}).then(async () => {
+      if (!await current()) return false
+      renderer.stop()
+      await renderer.compile(dsl)
+      renderer.stop()
+      if (!await current()) return false
+      renderer.start()
+      return true
+    })
+    compileQueue = task
+    return task
+  }
+
+  async function restoreLocal(generation, force = false) {
+    if ((!showingShared && !force) || !localProgram) return
+    if (!await compileProgram(localProgram.dsl, () => generation === visualGeneration)) return
+    showingShared = false
+    title.textContent = localProgram.title
+    credit.textContent = localProgram.credit
+    programCode.textContent = localProgram.code
+    showCaption()
+  }
+
+  async function pollSharedProgram() {
+    if (polling || !sharing()) return
+    polling = true
+    const generation = visualGeneration
+    let changedSource = false
+    let compiling = false
+    try {
+      const snapshot = await veilamp.visualizer.program(sharedSource, sharedVersion)
+      if (generation !== visualGeneration || !snapshot) return
+      changedSource = snapshot.source !== sharedSource
+      if (changedSource) {
+        sharedSource = snapshot.source
+        sharedVersion = null
+      }
+      if (snapshot.available === false) { if (changedSource) await restoreLocal(generation); return }
+      if (!snapshot.source || !snapshot.version) {
+        sharedVersion = null
+        await restoreLocal(generation)
+        return
+      }
+      if (!changedSource && snapshot.version === sharedVersion) return
+      const dsl = snapshot.dsl
+      if (typeof dsl !== 'string' || !dsl.trim() || new TextEncoder().encode(dsl).length > 262144 ||
+          /\u0000|\b(?:media|camera|video|midi)\s*\(|\b(?:https?|data|blob|file):/i.test(dsl)) {
+        throw new Error('The shared program must use generative effects without media.')
+      }
+      const effects = core.extractEffectNamesFromDsl(dsl, renderer.manifest)
+      if (!effects.length || effects.some(effect => !effect.effectId || !renderer.manifest[effect.effectId])) {
+        throw new Error('The shared program contains an unavailable effect.')
+      }
+      await renderer.loadEffects([...new Set(effects.map(effect => effect.effectId))])
+      core.compile(dsl)
+      let actualSource = snapshot.source
+      compiling = true
+      const applied = await compileProgram(dsl, async () => {
+        if (generation !== visualGeneration) return false
+        actualSource = await veilamp.visualizer.source()
+        return generation === visualGeneration && actualSource === snapshot.source
+      })
+      if (!applied) {
+        if (generation === visualGeneration) {
+          sharedSource = actualSource
+          sharedVersion = null
+          await restoreLocal(generation, true)
+        }
+        return
+      }
+      sharedVersion = snapshot.version
+      showingShared = true
+      title.textContent = 'Shared visual'
+      credit.textContent = ''
+      programCode.textContent = ''
+      showCaption()
+      setStatus('')
+    } catch (error) {
+      if (changedSource || compiling) await restoreLocal(generation, true)
+      // Audio and local visuals continue when a peer has no DSL extension.
+      veilamp.log('Noisemaker could not receive a visual program:', error.message || error)
+    } finally {
+      polling = false
+      setTimeout(pollSharedProgram, 1500)
+    }
+  }
 
   function setStatus(message, duration = 0) {
     clearTimeout(statusTimer)
@@ -267,6 +367,7 @@
   // It then loads the modified program.
   async function randomize() {
     if (randomizing || !renderer || !core) return randomizing
+    const generation = ++visualGeneration
     randomizing = (async () => {
       button.disabled = true
       setStatus('Randomizing...')
@@ -333,14 +434,19 @@
             })
             if (!/\baudio\s*\(/.test(dsl)) throw new Error('Noisemaker did not add an audio() input.')
             await yieldToUi()
-            await renderer.compile(dsl)
-            renderer.start()
+            if (!await compileProgram(dsl, () => generation === visualGeneration)) return
             currentCode = item.code
             title.textContent = item.title || composition.title || 'Untitled'
             credit.textContent = `by ${creatorName(item.username)}`
             programCode.textContent = item.code
+            showingShared = false
+            localProgram = { dsl, title: title.textContent, credit: credit.textContent, code: item.code }
             showCaption()
             setStatus('')
+            if (sharing()) {
+              try { await veilamp.visualizer.setProgram(dsl) }
+              catch (error) { veilamp.log('Noisemaker could not share a visual program:', error.message || error) }
+            }
             return
           } catch (error) {
             lastError = error
@@ -349,6 +455,7 @@
         }
         throw lastError || new Error('Noisemaker could not load a compatible generative program.')
       } catch (error) {
+        await restoreLocal(generation, true)
         setStatus(error.message || 'Noisemaker could not load a program.')
         veilamp.log('Noisemaker error:', error)
       } finally {
@@ -398,6 +505,7 @@
       if (typeof ResizeObserver !== 'undefined') new ResizeObserver(resize).observe(canvas)
       window.addEventListener('resize', resize)
       await randomize()
+      if (sharing()) void pollSharedProgram()
     } catch (error) {
       setStatus(error.message || 'Noisemaker could not start.')
       veilamp.log('Noisemaker startup error:', error)
