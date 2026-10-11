@@ -1,8 +1,6 @@
 # Noisemaker for Veilamp
 
-<a href="https://shuffleset.stream/noisedeck/video/misc/misc/noisemaker-for-veilamp-v1_1.mp4">
-  <img src="https://shuffleset.stream/noisedeck/video/misc/misc/poster/noisemaker-for-veilamp-v1_1.mp4" alt="Watch Noisemaker for Veilamp" width="100%">
-</a>
+![Veilamp with the Noisemaker visualizer and control tray open](assets/veilamp-noisemaker.jpg)
 
 [Watch the video](https://shuffleset.stream/noisedeck/video/misc/misc/noisemaker-for-veilamp-v1_1.mp4)
 
