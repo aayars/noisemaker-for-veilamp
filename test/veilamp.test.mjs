@@ -7,12 +7,12 @@ import { Script, SyntheticModule, createContext } from 'node:vm'
 
 const entry = new URL('../plugin/index.js', import.meta.url)
 
-async function boot({ imageComposition = false, random = 0, width = 640, height = 360, dpr = 1, playerGranted = true, catalogTotal = 3, frontEmpty = false, visualBridge = null, compileHook = null } = {}) {
+async function boot({ imageComposition = false, random = 0, width = 640, height = 360, dpr = 1, playerGranted = true, catalogTotal = 3, frontEmpty = false } = {}) {
   const source = await readFile(entry, 'utf8').catch(() => '')
   const manifest = JSON.parse(await readFile(new URL('../plugin/plugin.json', import.meta.url), 'utf8'))
   const listeners = new Map()
   const elements = new Map()
-  for (const id of ['canvas', 'title', 'credit', 'program-code', 'caption', 'status', 'randomize', 'tap-tempo', 'tray-toggle', 'tray', 'divider', 'peer-notice', 'tempo-value']) {
+  for (const id of ['canvas', 'title', 'credit', 'program-code', 'caption', 'status', 'randomize', 'tap-tempo', 'tray-toggle', 'tray', 'divider', 'tempo-value']) {
     const classes = new Set()
     elements.set(id, {
       textContent: '', disabled: false, hidden: false, value: '',
@@ -43,7 +43,7 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
       async loadEffects() {}
       setLoopDuration(seconds) { this.loopDuration = seconds }
       setAudioState() { return this.audioState = { spectrum: new Float32Array(128), waveform: new Float32Array(128), setRaw(v) { this.raw = v } } }
-      async compile(dsl) { if (compileHook) await compileHook(dsl); this.compiled.push(dsl); if (this.started) this.frames.push(dsl); return {} }
+      async compile(dsl) { this.compiled.push(dsl); if (this.started) this.frames.push(dsl); return {} }
       resize() {}
       start() { this.started = true }
       stop() { this.started = false }
@@ -71,11 +71,17 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
     visualizer: manifest.permissions.includes('visualizer'),
     player: playerGranted && manifest.permissions.includes('player')
   }
-  const veilamp = { caps, visualizer: visualBridge, ready(fn) { fn() }, on(name, fn) {
+  const standardApiReads = []
+  const veilamp = new Proxy({ caps, ready(fn) { fn() }, on(name, fn) {
     const permission = { viz: 'visualizer', playback: 'player', theme: null }
     assert.ok(Object.hasOwn(permission, name), `Veilamp does not support the ${name} event.`)
     if (!permission[name] || caps[permission[name]]) events.set(name, fn)
-  }, log(...args) { console.error('VEILAMP LOG', ...args) } }
+  }, log(...args) { console.error('VEILAMP LOG', ...args) } }, {
+    get(target, name) {
+      if (name === 'visualizer') standardApiReads.push(name)
+      return Reflect.get(target, name)
+    }
+  })
   const context = createContext({
     document: { getElementById() { return root } },
     window: { devicePixelRatio: dpr, addEventListener(name, fn) { listeners.set(`window:${name}`, fn) }, requestAnimationFrame(fn) { return globalThis.setTimeout(fn, 0) } }, veilamp, fetch,
@@ -94,16 +100,12 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
   new Script(source, { importModuleDynamically: () => module }).runInContext(context)
   const startupDeadline = Date.now() + 2000
   while (Date.now() < startupDeadline) {
-    if (engine.renderer?.started && (!elements.get('randomize').disabled || !elements.get('peer-notice').hidden) &&
-        (!visualBridge || [...delayed.values()].some(timer => timer.ms === 1500))) break
+    if (engine.renderer?.started && !elements.get('randomize').disabled) break
     await new Promise(resolve => setTimeout(resolve, 5))
   }
   assert.ok(engine.renderer?.started, 'The plugin must complete startup.')
-  return { root, elements, listeners, events, engine, fetchCalls, timeline,
+  return { root, elements, listeners, events, engine, fetchCalls, timeline, standardApiReads,
     setClock(value) { clockNow = value },
-    async poll() {
-      for (const [id, timer] of delayed) if (timer.ms === 1500) { delayed.delete(id); await timer.fn(); break }
-    },
     runDelayed() { for (const { fn } of delayed.values()) fn(); delayed.clear() } }
 }
 
@@ -232,9 +234,11 @@ test('The controls start closed. The tray button opens them', async () => {
 test('The divider cycles from /4 and sets loop duration', async () => {
   const app = await boot()
   assert.equal(app.elements.get('divider').textContent, '/4')
+  assert.equal(app.elements.get('tempo-value').textContent, '140 BPM /4')
   assert.equal(app.engine.renderer.loopDuration, (60 / 140) * 4 * 4)
   app.listeners.get('divider:click')()
   assert.equal(app.elements.get('divider').textContent, '/8')
+  assert.equal(app.elements.get('tempo-value').textContent, '140 BPM /8')
   assert.equal(app.engine.renderer.loopDuration, (60 / 140) * 4 * 8)
   assert.match(app.elements.get('status').textContent, /140 BPM \/8/)
   app.listeners.get('divider:click')()
@@ -262,322 +266,31 @@ test('The canvas uses half pixel density in large windows', async () => {
 })
 
 
-const sharedDsl = 'search synth, render\nnoise(scale: audio(band: audioBand.high, min: 1, max: 0)).write(o0)\nrender(o0)'
-
-function bridge(initial = { source: null, version: null, dsl: null, available: true }) {
-  let state = initial
-  const published = []
-  const reads = []
-  return {
-    published, reads,
-    set(value) { state = value },
-    async setProgram(dsl) { published.push(dsl) },
-    async program(source, version) { reads.push([source, version]); return state },
-    async source() { return state.source }
-  }
-}
-
-test('Sharing publishes the compiled audio DSL and receives the exact source DSL', async () => {
-  const wire = bridge()
-  const app = await boot({ visualBridge: wire })
-  assert.equal(wire.published.length, 1)
-  assert.equal(wire.published[0], `// @veilamp-tempo 140 4\n${app.engine.renderer.compiled[0]}`)
-  assert.match(wire.published[0], /audio\(/)
-  wire.set({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.at(-1), sharedDsl)
-  assert.equal(wire.published.length, 1, 'Received DSL must not produce an echo.')
-  assert.equal(app.elements.get('title').textContent, 'Shared visual')
-  app.events.get('viz')({ bars: Array(32).fill(0.8), left: 0.8, right: 0.8 })
-  assert.ok(Math.abs(app.engine.renderer.audioState.high - 0.8) < 1e-6)
+test('The plugin uses the standard Veilamp API without checking extension methods', async () => {
+  const app = await boot()
+  assert.deepEqual(app.standardApiReads, [])
+  assert.ok(app.events.has('viz'))
+  assert.ok(app.events.has('playback'))
 })
 
-test('Unchanged versions do not compile again. Source changes request a fresh snapshot', async () => {
-  const wire = bridge({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  const app = await boot({ visualBridge: wire })
-  const count = app.engine.renderer.compiled.length
-  wire.set({ source: '1:0', version: 'a', dsl: null, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.length, count)
-  assert.deepEqual(wire.reads.at(-1), ['1:0', 'a'])
-  wire.set({ source: '2:0', version: 'a', dsl: sharedDsl, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.length, count + 1)
-  wire.set({ source: null, version: null, dsl: null, available: true })
-  await app.poll()
-  assert.notEqual(app.engine.renderer.compiled.at(-1), sharedDsl)
-})
-
-test('Shared programs with media, URLs, or excessive text never compile', async () => {
-  const wire = bridge()
-  const app = await boot({ visualBridge: wire })
-  wire.set({ source: '1:0', version: 'valid', dsl: sharedDsl, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.at(-1), sharedDsl)
-  const count = app.engine.renderer.compiled.length
-  for (const [i, dsl] of ['media(url: "https://example.com/image.png")', 'noise(url: "https://example.com")', 'x'.repeat(262145)].entries()) {
-    wire.set({ source: '1:0', version: String(i), dsl, available: true })
-    await app.poll()
-    assert.equal(app.engine.renderer.compiled.length, count)
-  }
-})
-
-test('Peer control disables all visual controls and blocks keyboard changes', async () => {
-  const wire = bridge({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  const app = await boot({ visualBridge: wire })
-  const count = app.engine.renderer.compiled.length
-  const duration = app.engine.renderer.loopDuration
-  const writes = wire.published.length
-  for (const id of ['randomize', 'tap-tempo', 'divider']) assert.equal(app.elements.get(id).disabled, true)
-  app.listeners.get('tray-toggle:click')()
-  assert.equal(app.elements.get('tray').hidden, false)
-  assert.equal(app.elements.get('peer-notice').hidden, false)
-  assert.equal(app.elements.get('peer-notice').textContent, 'Visuals currently controlled by peer.')
-  app.listeners.get('randomize:click')()
-  app.listeners.get('divider:click')()
-  app.setClock(500)
-  app.listeners.get('tap-tempo:click')()
-  app.setClock(1000)
-  app.listeners.get('tap-tempo:click')()
-  app.listeners.get('window:keydown')({ key: 'r', repeat: false })
-  app.listeners.get('window:keydown')({ key: 't', repeat: false })
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(app.engine.renderer.compiled.length, count)
-  assert.equal(app.engine.renderer.loopDuration, duration)
-  assert.equal(wire.published.length, writes)
-  wire.set({ source: '1:0', version: 'b', dsl: sharedDsl, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.at(-1), sharedDsl)
-})
-
-test('A temporary disconnect retains the source visual. A different source restores the local visual', async () => {
-  const wire = bridge({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  const app = await boot({ visualBridge: wire })
-  wire.set({ source: '1:0', version: null, dsl: null, available: false })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.at(-1), sharedDsl)
-  wire.set({ source: '2:0', version: null, dsl: null, available: false })
-  await app.poll()
-  assert.notEqual(app.engine.renderer.compiled.at(-1), sharedDsl)
-})
-
-test('A new source with invalid DSL restores the local program', async () => {
-  const wire = bridge({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  const app = await boot({ visualBridge: wire })
-  wire.set({ source: '2:0', version: 'b', dsl: 'media()', available: true })
-  await app.poll()
-  assert.notEqual(app.engine.renderer.compiled.at(-1), sharedDsl)
-  assert.equal(app.elements.get('title').textContent, 'Noise')
-})
-
-test('A source change during compile cannot apply stale DSL without a player grant', async () => {
-  const wire = bridge()
-  let finish
-  let compiling
-  const started = new Promise(resolve => { compiling = resolve })
-  const gate = new Promise(resolve => { finish = resolve })
-  const app = await boot({ visualBridge: wire, playerGranted: false, compileHook: async dsl => {
-    if (dsl === sharedDsl) { compiling(); await gate }
-  } })
-  wire.set({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  const pending = app.poll()
-  await started
-  wire.set({ source: null, version: null, dsl: null, available: true })
-  finish()
-  await pending
-  assert.notEqual(app.engine.renderer.compiled.at(-1), sharedDsl)
-  assert.equal(app.elements.get('title').textContent, 'Noise')
-})
-
-
-test('Rendering pauses until the shared source passes the post-compile check', async () => {
-  const wire = bridge()
-  let finish
-  let compiling
-  const started = new Promise(resolve => { compiling = resolve })
-  const gate = new Promise(resolve => { finish = resolve })
-  const app = await boot({ visualBridge: wire, playerGranted: false, compileHook: async dsl => {
-    if (dsl === sharedDsl) { compiling(); await gate }
-  } })
-  wire.set({ source: '1:0', version: 'a', dsl: sharedDsl, available: true })
-  const pending = app.poll()
-  await started
-  wire.set({ source: null, version: null, dsl: null, available: true })
-  finish()
-  await pending
-  assert.ok(!app.engine.renderer.frames.includes(sharedDsl), 'A stale shared pipeline must never render.')
-  assert.equal(app.engine.renderer.started, true, 'The local pipeline must resume rendering.')
-})
-
-
-test('A sender publishes BPM and divider changes in its DSL comment', async () => {
-  const wire = bridge()
-  const app = await boot({ visualBridge: wire })
-  const dsl = app.engine.renderer.compiled.at(-1)
-  assert.equal(wire.published.at(-1), `// @veilamp-tempo 140 4\n${dsl}`)
-  app.setClock(500)
-  app.listeners.get('tap-tempo:click')()
-  app.setClock(1000)
-  app.listeners.get('tap-tempo:click')()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(wire.published.at(-1), `// @veilamp-tempo 120 4\n${dsl}`)
-  app.listeners.get('divider:click')()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(wire.published.at(-1), `// @veilamp-tempo 120 8\n${dsl}`)
-  assert.equal(app.elements.get('tempo-value').textContent, '120 BPM /8')
-})
-
-test('A listener applies peer timing without compiling unchanged effects again', async () => {
-  const wire = bridge({ source: '1:0', version: 'a', dsl: `// @veilamp-tempo 120 8\n${sharedDsl}`, available: true })
-  const app = await boot({ visualBridge: wire })
-  assert.equal(app.engine.renderer.compiled.at(-1), sharedDsl)
-  assert.equal(app.engine.renderer.loopDuration, 16)
-  assert.equal(app.elements.get('divider').textContent, '/8')
-  assert.equal(app.elements.get('tempo-value').textContent, '120 BPM /8')
-  const count = app.engine.renderer.compiled.length
-  wire.set({ source: '1:0', version: 'b', dsl: `// @veilamp-tempo 96 16\n${sharedDsl}`, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.loopDuration, 40)
-  assert.equal(app.engine.renderer.compiled.length, count)
-  assert.equal(app.elements.get('tempo-value').textContent, '96 BPM /16')
-  wire.set({ source: '1:0', version: 'b', dsl: null, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.compiled.length, count)
-  assert.equal(app.engine.renderer.loopDuration, 40)
-  assert.equal(wire.published.length, 0, 'Listeners must not publish peer timing.')
-})
-
-test('Local playback restores local timing and unlocks the controls', async () => {
-  const wire = bridge()
-  const app = await boot({ visualBridge: wire })
-  app.setClock(500)
-  app.listeners.get('tap-tempo:click')()
-  app.setClock(1000)
-  app.listeners.get('tap-tempo:click')()
-  app.listeners.get('divider:click')()
-  wire.set({ source: '1:0', version: 'a', dsl: `// @veilamp-tempo 96 16\n${sharedDsl}`, available: true })
-  await app.poll()
-  wire.set({ source: null, version: null, dsl: null, available: true })
-  await app.poll()
-  assert.equal(app.engine.renderer.loopDuration, 16)
-  assert.equal(app.elements.get('tempo-value').textContent, '120 BPM /8')
+test('Remote playback retains local tempo controls and audio response', async () => {
+  const app = await boot()
+  app.events.get('playback')({ remote: true, trackId: 1, playing: true })
   for (const id of ['randomize', 'tap-tempo', 'divider']) assert.equal(app.elements.get(id).disabled, false)
-  assert.equal(app.elements.get('peer-notice').hidden, true)
-})
-
-test('Invalid peer tempo and divider values do not change the active program or timing', async () => {
-  const wire = bridge({ source: '1:0', version: 'valid', dsl: `// @veilamp-tempo 120 8\n${sharedDsl}`, available: true })
-  const app = await boot({ visualBridge: wire })
-  const count = app.engine.renderer.compiled.length
-  for (const [i, timing] of ['0 4', 'Infinity 4', '120 3', '-60 4', '120 8.5', 'NaN 4'].entries()) {
-    wire.set({ source: '1:0', version: String(i), dsl: `// @veilamp-tempo ${timing}\n${sharedDsl}`, available: true })
-    await app.poll()
-    assert.equal(app.engine.renderer.loopDuration, 16)
-    assert.equal(app.engine.renderer.compiled.length, count)
-  }
-})
-
-
-test('A playback event restores local timing before randomizing a local track', async () => {
-  const wire = bridge()
-  const app = await boot({ visualBridge: wire })
-  app.events.get('playback')({ playing: true, remote: false, trackId: 1 })
-  app.setClock(500)
-  app.listeners.get('tap-tempo:click')()
-  app.setClock(1000)
-  app.listeners.get('tap-tempo:click')()
   app.listeners.get('divider:click')()
-  wire.set({ source: '1:0', version: 'a', dsl: `// @veilamp-tempo 96 16\n${sharedDsl}`, available: true })
-  await app.poll()
-  app.events.get('playback')({ playing: true, remote: true, trackId: 1 })
-  wire.set({ source: null, version: null, dsl: null, available: true })
-  app.events.get('playback')({ playing: true, remote: false, trackId: 2 })
-  const deadline = Date.now() + 2000
-  while (app.elements.get('randomize').disabled && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-  await app.poll()
-  assert.equal(app.engine.renderer.loopDuration, 16)
+  const tap = app.listeners.get('tap-tempo:click')
+  app.setClock(1000); tap()
+  app.setClock(1500); tap()
   assert.equal(app.elements.get('tempo-value').textContent, '120 BPM /8')
-  assert.match(wire.published.at(-1), /^\/\/ @veilamp-tempo 120 8\n/)
-})
-
-
-test('A delayed empty snapshot cannot unlock a new remote source', async () => {
-  for (const available of [true, false]) {
-    const wire = bridge()
-    const app = await boot({ visualBridge: wire })
-    let release
-    let entered
-    const requested = new Promise(resolve => { entered = resolve })
-    const reply = new Promise(resolve => { release = resolve })
-    wire.program = async () => { entered(); return reply }
-    const pending = app.poll()
-    await requested
-    wire.set({ source: '2:0', version: null, dsl: null, available: false })
-    app.events.get('playback')({ playing: true, remote: true, trackId: 1 })
-    release({ source: null, version: null, dsl: null, available })
-    await pending
-    for (const id of ['randomize', 'tap-tempo', 'divider']) assert.equal(app.elements.get(id).disabled, true)
-    assert.equal(app.elements.get('peer-notice').hidden, false)
-    assert.equal(app.engine.renderer.started, true)
-  }
-})
-
-test('A remote source without DSL cannot stop a pending local randomization', async () => {
-  const wire = bridge()
-  let release
-  let entered
-  let block = false
-  const compiling = new Promise(resolve => { entered = resolve })
-  const gate = new Promise(resolve => { release = resolve })
-  const app = await boot({ visualBridge: wire, compileHook: async () => {
-    if (block) { block = false; entered(); await gate }
-  } })
-  const original = app.engine.renderer.compiled.at(-1)
-  const writes = wire.published.length
-  block = true
-  app.listeners.get('randomize:click')()
-  await compiling
-  wire.set({ source: '2:0', version: null, dsl: null, available: false })
-  app.events.get('playback')({ playing: true, remote: true, trackId: 1 })
-  release()
-  const deadline = Date.now() + 2000
-  while (app.elements.get('status').textContent === 'Randomizing...' && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-  await app.poll()
-  assert.equal(app.engine.renderer.started, true, 'The fallback pipeline must resume rendering.')
-  assert.equal(app.engine.renderer.compiled.at(-1), original)
-  assert.equal(wire.published.length, writes, 'A canceled local program must not be published.')
-  assert.equal(app.elements.get('peer-notice').hidden, false)
-})
-
-test('A canceled randomization cannot replace an accepted peer pipeline with its fallback', async () => {
-  const wire = bridge()
-  let release
-  let entered
-  let block = false
-  const compiling = new Promise(resolve => { entered = resolve })
-  const gate = new Promise(resolve => { release = resolve })
-  const app = await boot({ visualBridge: wire, compileHook: async () => {
-    if (block) { block = false; entered(); await gate }
-  } })
-  block = true
-  app.listeners.get('randomize:click')()
-  await compiling
-  wire.set({ source: '2:0', version: 'a', dsl: `// @veilamp-tempo 120 8\n${sharedDsl}`, available: true })
-  app.events.get('playback')({ playing: true, remote: true, trackId: 1 })
-  const pending = app.poll()
-  await new Promise(resolve => setImmediate(resolve))
-  release()
-  await pending
-  const deadline = Date.now() + 2000
-  while (app.elements.get('status').textContent === 'Randomizing...' && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-  assert.equal(app.engine.renderer.started, true)
-  assert.equal(app.engine.renderer.compiled.at(-1), sharedDsl)
   assert.equal(app.engine.renderer.loopDuration, 16)
-  assert.equal(app.elements.get('title').textContent, 'Shared visual')
+  app.events.get('viz')({ rawBars: Array(32).fill(1), left: 1, right: 1 })
+  assert.equal(app.engine.renderer.audioState.vol, 1)
+  const previous = app.engine.renderer.compiled.length
+  app.listeners.get('randomize:click')()
+  const deadline = Date.now() + 1000
+  while (app.engine.renderer.compiled.length === previous && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(app.engine.renderer.compiled.length, previous + 1)
+  assert.equal(app.elements.get('tempo-value').textContent, '120 BPM /8')
 })

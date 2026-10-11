@@ -26,46 +26,8 @@ To fit Veilamp navigation within the window:
 3. Select the Noisemaker theme.
 
 The plugin needs internet access to load the runtime, shader assets, and programs.
-The files run directly in Veilamp. You can import the files without a build step.
+The files run directly in standard Veilamp. You can import the files without a build step or source patch.
 We checked the native integration with Veilamp 0.3.6 on macOS.
-
-## Visuals with friend streams
-
-The optional Veilamp source extension adds automatic DSL sharing.
-Both peers need this extension and the Noisemaker plugin enabled.
-The existing `visualizer` permission controls DSL access. No new buttons or permissions are required.
-
-When a friend streams your shared track, their plugin receives your current DSL and later program changes.
-The receiver renders the program locally and uses their received audio for `audio()` inputs.
-The transport sends DSL text and version markers. A DSL comment carries the BPM and divider.
-It does not send pixels, images, or audio analysis samples.
-It uses Veilamp's signed private-route requests and requires an authorized friend and a shared track.
-Signed peer requests contain the requester identity and track ID.
-Seance is not a dependency.
-
-The streamer controls Dice, TAP, and the divider.
-The listener's tray shows “Visuals currently controlled by peer.” It shows the streamer's current BPM and divider.
-All three buttons are gray and disabled for listeners. Keyboard shortcuts cannot change the peer's visual or timing.
-BPM and divider changes apply without recompiling unchanged effects.
-A temporary disconnect retains the last received visual and timing.
-Local playback restores the local visual and timing. It enables the controls again.
-Each peer uses its own playback samples and local clock. Matching settings do not guarantee identical frames.
-Disabling the plugin or removing its visualizer grant clears its outgoing program.
-The outgoing program stays in memory and has a 256 KiB limit.
-
-Standard Veilamp builds keep the plugin's local visuals and audio response.
-They need the source extension to share DSL.
-
-To build Veilamp with the extension:
-
-1. Get the official [Veilamp source](https://gitlab.com/wrewtopia-labs-group/veilamp).
-2. Check the patch with `python3 extension/apply.py --check /path/to/veilamp`.
-3. Apply it with `python3 extension/apply.py /path/to/veilamp`.
-4. Follow Veilamp's build instructions. Enable `custom-protocol` for a standalone desktop binary.
-5. Import this repository's `plugin` folder into each peer. Enable Noisemaker with the existing grants.
-
-The patch targets the Veilamp 0.3.6 source and includes native transport and sandbox tests.
-The Veilamp extension follows upstream MPL-2.0 licensing. This repository's plugin and application script use MIT.
 
 ## Controls
 
@@ -77,8 +39,8 @@ Open the control tray with the button at the lower right.
 | TAP | Tap repeatedly to set the tempo. |
 | Divider | Tap to cycle through /1, /2, /4, /8, and /16. |
 
-The local tempo starts at 140 BPM. The divider starts at /4.
-The tray shows the current BPM and divider. Listeners use the streamer's values.
+The tempo starts at 140 BPM. The divider starts at /4.
+The tray shows the current BPM and divider. Each listener controls their own visual and timing.
 The loop duration is four beats multiplied by the divider.
 For example, /4 gives a loop of 16 beats.
 The keyboard shortcuts are R for randomize, T for tempo, and Escape to close the tray.
@@ -92,6 +54,8 @@ Veilamp blocks pointer input for plugins in its built-in Visualizer view.
 The plugin uses a panel so its buttons receive input.
 
 ## Programs and audio
+
+The plugin renders visuals locally. It does not share visual programs or timing with stream listeners.
 
 The randomizer selects a generative program from the public catalog.
 It skips programs that require images, media, camera, video, MIDI, or custom effects.

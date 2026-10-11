@@ -29,10 +29,9 @@
       .nm-tray { flex-direction:column; position:absolute; right:16px; bottom:calc(var(--nm-control-size) + 24px); display:flex; align-items:stretch;
         gap:6px; padding:6px; border:1px solid #64c9d8; border-radius:5px;
         background:#081923ec; box-shadow:0 8px 24px #0009; }
-      .nm-tray[hidden], .nm-peer-notice[hidden] { display:none; }
+      .nm-tray[hidden] { display:none; }
       .nm-tray-info { display:flex; flex-direction:column; gap:6px; min-width:0; }
       .nm-tray-actions { display:flex; gap:6px; }
-      .nm-peer-notice { max-width:calc(var(--nm-control-size) * 3 + 12px); color:#c4d7df; }
       .nm-tempo-value { color:#c4d7df; font-variant-numeric:tabular-nums; }
 
       .nm-handle { position:absolute; right:16px; bottom:16px; }
@@ -55,8 +54,7 @@
           max-height:calc(100% - 8px); overflow:hidden; overflow-wrap:anywhere; }
         .nm-status { top:4px; left:4px; right:4px; max-height:calc(100% - 8px); }
         .nm-tray-actions { gap:4px; }
-        .nm-peer-notice, .nm-tempo-value { font-size:10px; }
-        .nm-peer-notice { max-width:min(180px, calc(100vw - 18px)); }
+        .nm-tempo-value { font-size:10px; }
         .nm-action .nm-tap-icon { font-size:9px; }
         .nm-divider { font-size:10px; }
       }
@@ -73,7 +71,6 @@
       <div class="nm-caption" id="caption"><strong id="title">Noisemaker</strong><small id="credit"></small><code id="program-code"></code></div>
       <div class="nm-tray" id="tray" hidden>
         <div class="nm-tray-info">
-          <div class="nm-peer-notice" id="peer-notice" role="status" hidden></div>
           <div class="nm-tempo-value" id="tempo-value"></div>
         </div>
         <div class="nm-tray-actions">
@@ -96,10 +93,7 @@
   const tray = root.querySelector('#tray')
   const trayToggle = root.querySelector('#tray-toggle')
   const dividerButton = root.querySelector('#divider')
-  const peerNotice = root.querySelector('#peer-notice')
   const tempoValue = root.querySelector('#tempo-value')
-  peerNotice.textContent = 'Visuals currently controlled by peer.'
-  peerNotice.hidden = true
   button.disabled = true
   tray.hidden = true
   dividerButton.textContent = '/4'
@@ -116,176 +110,6 @@
   let taps = []
   let tempoBpm = 140
   let tempoDivider = 4
-  let localProgram = null
-  let sharedSource = null
-  let sharedVersion = null
-  let showingShared = false
-  let peerControlled = false
-  let sharedProgramDsl = null
-  let localTiming = { bpm: 140, divider: 4 }
-  let visualGeneration = 0
-  let compileQueue = Promise.resolve()
-  let polling = false
-  let rendering = false
-
-  const sharing = () => veilamp.caps.visualizer &&
-    typeof veilamp.visualizer?.setProgram === 'function' &&
-    typeof veilamp.visualizer?.program === 'function' &&
-    typeof veilamp.visualizer?.source === 'function'
-
-  function updateControls() {
-    button.disabled = peerControlled || !!randomizing || !renderer
-    tapButton.disabled = peerControlled
-    dividerButton.disabled = peerControlled
-    peerNotice.hidden = !peerControlled
-  }
-
-  function setPeerControl(controlled) {
-    const previous = peerControlled
-    peerControlled = controlled
-    if (previous && !controlled) {
-      taps = []
-      useTiming(localTiming.bpm, localTiming.divider)
-    }
-    updateControls()
-  }
-
-  function readSharedProgram(text) {
-    if (!text.startsWith('// @veilamp-tempo')) return { dsl: text, bpm: 140, divider: 4 }
-    const header = text.match(/^\/\/ @veilamp-tempo ([^\s]+) ([^\s]+)\r?\n/)
-    const bpm = Number(header?.[1])
-    const divider = Number(header?.[2])
-    if (!header || !Number.isFinite(bpm) || bpm <= 40 || bpm >= 300 || !DIVIDERS.includes(divider)) {
-      throw new Error('The shared tempo or divider is invalid.')
-    }
-    const dsl = text.slice(header[0].length)
-    if (!dsl.trim()) throw new Error('The shared program is empty.')
-    return { dsl, bpm, divider }
-  }
-
-  async function publishLocalProgram() {
-    if (!sharing() || peerControlled || !localProgram) return
-    const dsl = `// @veilamp-tempo ${localTiming.bpm} ${localTiming.divider}\n${localProgram.dsl}`
-    try { await veilamp.visualizer.setProgram(dsl) }
-    catch (error) { veilamp.log('Noisemaker could not share a visual program:', error.message || error) }
-  }
-
-  function useTiming(bpm, divider) {
-    if (tempoBpm === bpm && tempoDivider === divider) return
-    tempoBpm = bpm
-    tempoDivider = divider
-    applyTempo()
-  }
-
-  function compileProgram(dsl, current = () => true, accepted = () => {}) {
-    const task = compileQueue.catch(() => {}).then(async () => {
-      if (!await current()) return false
-      renderer.stop()
-      rendering = false
-      await renderer.compile(dsl)
-      renderer.stop()
-      if (!await current()) return false
-      accepted()
-      renderer.start()
-      rendering = true
-      return true
-    })
-    compileQueue = task
-    return task
-  }
-
-  async function restoreLocal(generation, force = false, current = () => true) {
-    if ((!showingShared && !force) || !localProgram) return
-    if (!await compileProgram(localProgram.dsl, () => generation === visualGeneration && current(),
-      () => useTiming(localTiming.bpm, localTiming.divider))) return
-    showingShared = false
-    sharedProgramDsl = null
-    title.textContent = localProgram.title
-    credit.textContent = localProgram.credit
-    programCode.textContent = localProgram.code
-    showCaption()
-  }
-
-  async function pollSharedProgram() {
-    if (polling || !sharing()) return
-    polling = true
-    const generation = visualGeneration
-    let changedSource = false
-    let compiling = false
-    try {
-      const source = await veilamp.visualizer.source()
-      if (generation !== visualGeneration) return
-      setPeerControl(!!source)
-      const snapshot = await veilamp.visualizer.program(sharedSource, sharedVersion)
-      if (generation !== visualGeneration || !snapshot) return
-      const latestSource = await veilamp.visualizer.source()
-      if (generation !== visualGeneration) return
-      setPeerControl(!!latestSource)
-      if (snapshot.source !== latestSource) return
-      changedSource = snapshot.source !== sharedSource
-      if (changedSource) {
-        sharedSource = snapshot.source
-        sharedVersion = null
-      }
-      if (snapshot.available === false) { if (changedSource) await restoreLocal(generation); return }
-      if (!snapshot.source || !snapshot.version) {
-        sharedVersion = null
-        await restoreLocal(generation)
-        return
-      }
-      if (!changedSource && snapshot.version === sharedVersion) return
-      const text = snapshot.dsl
-      if (typeof text !== 'string' || !text.trim() || new TextEncoder().encode(text).length > 262144 ||
-          /\u0000|\b(?:media|camera|video|midi)\s*\(|\b(?:https?|data|blob|file):/i.test(text)) {
-        throw new Error('The shared program must use generative effects without media.')
-      }
-      const { dsl, bpm, divider } = readSharedProgram(text)
-      let actualSource = snapshot.source
-      const current = async () => {
-        if (generation !== visualGeneration) return false
-        actualSource = await veilamp.visualizer.source()
-        return generation === visualGeneration && actualSource === snapshot.source
-      }
-      let applied
-      if (!changedSource && showingShared && sharedProgramDsl === dsl) {
-        applied = await current()
-        if (applied) useTiming(bpm, divider)
-      } else {
-        const effects = core.extractEffectNamesFromDsl(dsl, renderer.manifest)
-        if (!effects.length || effects.some(effect => !effect.effectId || !renderer.manifest[effect.effectId])) {
-          throw new Error('The shared program contains an unavailable effect.')
-        }
-        await renderer.loadEffects([...new Set(effects.map(effect => effect.effectId))])
-        core.compile(dsl)
-        compiling = true
-        applied = await compileProgram(dsl, current, () => useTiming(bpm, divider))
-      }
-      if (!applied) {
-        if (generation === visualGeneration) {
-          sharedSource = actualSource
-          setPeerControl(!!actualSource)
-          sharedVersion = null
-          await restoreLocal(generation, true)
-        }
-        return
-      }
-      sharedVersion = snapshot.version
-      showingShared = true
-      sharedProgramDsl = dsl
-      title.textContent = 'Shared visual'
-      credit.textContent = ''
-      programCode.textContent = ''
-      showCaption()
-      setStatus('')
-    } catch (error) {
-      if (changedSource || compiling) await restoreLocal(generation, true)
-      // Audio and local visuals continue when a peer has no DSL extension.
-      veilamp.log('Noisemaker could not receive a visual program:', error.message || error)
-    } finally {
-      polling = false
-      setTimeout(pollSharedProgram, 1500)
-    }
-  }
 
   function setStatus(message, duration = 0) {
     clearTimeout(statusTimer)
@@ -394,19 +218,17 @@
   }
 
   function applyTempo() {
-    if (renderer) renderer.setLoopDuration((60 / tempoBpm) * 4 * tempoDivider)
-    dividerButton.textContent = `/${tempoDivider}`
-    dividerButton.setAttribute('aria-label', `Time divider /${tempoDivider}`)
     tempoValue.textContent = `${Math.round(tempoBpm)} BPM /${tempoDivider}`
+    if (renderer) renderer.setLoopDuration((60 / tempoBpm) * 4 * tempoDivider)
   }
 
   function setDivider() {
-    if (peerControlled) return
-    tempoDivider = DIVIDERS[(DIVIDERS.indexOf(tempoDivider) + 1) % DIVIDERS.length]
-    localTiming = { bpm: tempoBpm, divider: tempoDivider }
+    const options = [1, 2, 4, 8, 16]
+    tempoDivider = options[(options.indexOf(tempoDivider) + 1) % options.length]
+    dividerButton.textContent = `/${tempoDivider}`
+    dividerButton.setAttribute('aria-label', `Time divider /${tempoDivider}`)
     applyTempo()
     setStatus(`${Math.round(tempoBpm)} BPM /${tempoDivider}`, 2200)
-    void publishLocalProgram()
   }
 
   function toggleTray() {
@@ -415,7 +237,7 @@
   }
 
   function tapTempo() {
-    if (!renderer || peerControlled) return
+    if (!renderer) return
     const now = performance.now()
     if (taps.length && now - taps[taps.length - 1] > 2000) taps = []
     taps.push(now)
@@ -432,10 +254,8 @@
       return
     }
     tempoBpm = nextBpm
-    localTiming = { bpm: tempoBpm, divider: tempoDivider }
     applyTempo()
     setStatus(`${Math.round(tempoBpm)} BPM /${tempoDivider}`, 2200)
-    void publishLocalProgram()
   }
 
   async function getCatalog() {
@@ -466,9 +286,8 @@
   // The randomizer selects a Noiseblaster program.
   // It replaces numeric parameters with Noisemaker audio() inputs.
   // It then loads the modified program.
-  async function randomize(startup = false) {
-    if ((peerControlled && !startup) || randomizing || !renderer || !core) return randomizing
-    const generation = ++visualGeneration
+  async function randomize() {
+    if (randomizing || !renderer || !core) return randomizing
     randomizing = (async () => {
       button.disabled = true
       setStatus('Randomizing...')
@@ -535,23 +354,14 @@
             })
             if (!/\baudio\s*\(/.test(dsl)) throw new Error('Noisemaker did not add an audio() input.')
             await yieldToUi()
-            if (!await compileProgram(dsl, () => generation === visualGeneration && (!peerControlled || startup))) {
-              if (generation === visualGeneration) {
-                await restoreLocal(generation, true, () => !rendering)
-                setStatus('')
-              }
-              return
-            }
+            await renderer.compile(dsl)
+            renderer.start()
             currentCode = item.code
             title.textContent = item.title || composition.title || 'Untitled'
             credit.textContent = `by ${creatorName(item.username)}`
             programCode.textContent = item.code
-            showingShared = false
-            sharedProgramDsl = null
-            localProgram = { dsl, title: title.textContent, credit: credit.textContent, code: item.code }
             showCaption()
             setStatus('')
-            await publishLocalProgram()
             return
           } catch (error) {
             lastError = error
@@ -560,12 +370,13 @@
         }
         throw lastError || new Error('Noisemaker could not load a compatible generative program.')
       } catch (error) {
-        await restoreLocal(generation, true)
         setStatus(error.message || 'Noisemaker could not load a program.')
         veilamp.log('Noisemaker error:', error)
+      } finally {
+        button.disabled = false
       }
     })()
-    try { return await randomizing } finally { randomizing = null; updateControls() }
+    try { return await randomizing } finally { randomizing = null }
   }
 
   button.addEventListener('click', () => { void randomize() })
@@ -582,7 +393,6 @@
     veilamp.on('viz', routeViz)
     if (veilamp.caps.player) veilamp.on('playback', info => {
       if (typeof info?.playing !== 'boolean') return
-      if (sharing()) setPeerControl(!!info.remote)
       playbackPlaying = info.playing
       if (!playbackPlaying) { silence(); return }
       let next = null
@@ -608,9 +418,7 @@
       audio = renderer.setAudioState()
       if (typeof ResizeObserver !== 'undefined') new ResizeObserver(resize).observe(canvas)
       window.addEventListener('resize', resize)
-      if (sharing()) setPeerControl(!!await veilamp.visualizer.source())
-      await randomize(true)
-      if (sharing()) void pollSharedProgram()
+      await randomize()
     } catch (error) {
       setStatus(error.message || 'Noisemaker could not start.')
       veilamp.log('Noisemaker startup error:', error)
