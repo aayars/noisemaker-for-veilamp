@@ -30,8 +30,7 @@ To fit Veilamp navigation within the window:
 3. Select the Noisemaker theme.
 
 The plugin needs internet access to load the runtime, shader assets, and programs.
-The files run directly in standard Veilamp. You can import the files without a build step or source patch.
-We checked the native integration with Veilamp 0.3.6 on macOS.
+The files run directly in standard Veilamp.
 
 ## Controls
 
@@ -44,7 +43,7 @@ Open the control tray with the button at the lower right.
 | Divider | Tap to cycle through /1, /2, /4, /8, and /16. |
 
 The tempo starts at 140 BPM. The divider starts at /4.
-The tray shows the current BPM and divider. Each listener controls their own visual and timing.
+The tray shows the current BPM and divider.
 The loop duration is four beats multiplied by the divider.
 For example, /4 gives a loop of 16 beats.
 The keyboard shortcuts are R for randomize, T for tempo, and Escape to close the tray.
@@ -54,12 +53,9 @@ The title, author, and program code fade after a short delay.
 A track change selects another program when Veilamp grants playback access.
 The canvas uses half its normal pixel density when its width or height exceeds 1024 pixels.
 
-Veilamp blocks pointer input for plugins in its built-in Visualizer view.
-The plugin uses a panel so its buttons receive input.
-
 ## Programs and audio
 
-The plugin renders visuals locally. It does not share visual programs or timing with stream listeners.
+The plugin renders visuals locally.
 
 The randomizer selects a generative program from the public catalog.
 It skips programs that require images, media, camera, video, MIDI, or custom effects.
@@ -73,14 +69,6 @@ Veilamp sends 32 spectrum bands and a mono waveform.
 The plugin maps these samples to low, mid, high, volume, spectrum, and waveform values in Noisemaker.
 The shader parameters read these values through `audio()`.
 Pause clears the audio values. The program's timed animation can continue.
-
-## WAV playback
-
-In a local check, Veilamp 0.3.6 did not play a WAV with an inconsistent RIFF length.
-A copy with the corrected RIFF length played.
-The copy retained all audio and metadata bytes.
-The original file stayed unchanged.
-This plugin does not change media files.
 
 ## Network and privacy
 
@@ -111,15 +99,10 @@ npm test
 ```
 
 The tests check program selection, audio bounds, event permissions, pause, tempo, divider, captions, and canvas dimensions.
-They use a test renderer. They do not prove native playback or GPU rendering.
-To check the native integration, import the plugin into Veilamp and use real audio.
-Check Play, Pause, the control tray, randomize, TAP, and the divider.
+They use a test renderer.
 
 ## License and attribution
 
 Copyright (c) 2026 Noise Factor LLC.
 The repository code uses the [MIT License](LICENSE).
 The [Trademark Policy](TRADEMARK.md) covers use of the Noisemaker and Noise Factor names.
-
-The parameter randomizer follows [Visualize](https://github.com/noisefactorllc/visualize).
-The repository does not bundle Veilamp, the Noisemaker runtime, or public programs.
