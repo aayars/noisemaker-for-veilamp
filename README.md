@@ -62,6 +62,8 @@ It skips programs that require images, media, camera, video, MIDI, or custom eff
 It replaces up to four numeric runtime parameters with Noisemaker `audio()` inputs.
 Programs with one available numeric parameter receive one input.
 The audio bounds stay within 0–1. Noisemaker scales them to each parameter's range.
+The randomizer forces `aspectLens: false` on every effect with the “1:1 aspect” control.
+This applies to explicit values and omitted defaults, so lens effects use the canvas aspect ratio.
 
 Veilamp sends 32 spectrum bands and a mono waveform.
 The plugin maps these samples to low, mid, high, volume, spectrum, and waveform values in Noisemaker.

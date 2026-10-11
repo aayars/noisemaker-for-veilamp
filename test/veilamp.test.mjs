@@ -7,7 +7,7 @@ import { Script, SyntheticModule, createContext } from 'node:vm'
 
 const entry = new URL('../plugin/index.js', import.meta.url)
 
-async function boot({ imageComposition = false, random = 0, width = 640, height = 360, dpr = 1, playerGranted = true, catalogTotal = 3, frontEmpty = false } = {}) {
+async function boot({ imageComposition = false, random = 0, width = 640, height = 360, dpr = 1, playerGranted = true, catalogTotal = 3, frontEmpty = false, lensAspects = null } = {}) {
   const source = await readFile(entry, 'utf8').catch(() => '')
   const manifest = JSON.parse(await readFile(new URL('../plugin/plugin.json', import.meta.url), 'utf8'))
   const listeners = new Map()
@@ -26,15 +26,30 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
   const root = { innerHTML: '', querySelector(selector) { return elements.get(selector.slice(1)) } }
   const events = new Map()
   const timeline = []
+  const lensEffects = ['filter/lens', 'filter/spiral', 'filter/lens']
+  const program = 'search synth, filter, render\nnoise(scale: 10)' +
+    (lensAspects || []).map((aspect, i) => `.${lensEffects[i].split('/')[1]}(antialias: false${aspect === null ? '' : `, aspectLens: ${aspect}`})`).join('') +
+    '.write(o0)\nrender(o0)'
   const engine = {
     compile(dsl) { timeline.push('dsl-compile'); return { dsl } },
     unparse(compiled, overrides) {
       const target = overrides[0]?.scale
-      return target ? compiled.dsl.replace('scale: 10', `scale: audio(band: audioBand.${['low', 'mid', 'high'][target.band]}, min: ${target.min}, max: ${target.max})`) : compiled.dsl
+      let dsl = target ? compiled.dsl.replace('scale: 10', `scale: audio(band: audioBand.${['low', 'mid', 'high'][target.band]}, min: ${target.min}, max: ${target.max})`) : compiled.dsl
+      let step = 1
+      dsl = dsl.replace(/\b(lens|spiral)\(([^)]*)\)/g, (call, name, args) => {
+        const aspect = overrides[step++]?.aspectLens
+        if (aspect === undefined) return call
+        args = args.replace(/,?\s*aspectLens:\s*(true|false)/g, '')
+        return `${name}(${args}, aspectLens: ${aspect})`
+      })
+      return dsl
     },
-    extractEffectNamesFromDsl() { return [{ effectId: 'synth/noise' }] },
-    extractEffectsFromDsl() { return [{ stepIndex: 0, effectKey: 'synth/noise' }] },
-    getEffect() { return { globals: { scale: { type: 'float', min: 1, max: 100 } } } },
+    extractEffectNamesFromDsl() { return [{ effectId: 'synth/noise' }, ...(lensAspects || []).map((_, i) => ({ effectId: lensEffects[i] }))] },
+    extractEffectsFromDsl() { return [{ stepIndex: 0, effectKey: 'synth/noise' }, ...(lensAspects || []).map((_, i) => ({ stepIndex: i + 1, effectKey: lensEffects[i] }))] },
+    getEffect(name) {
+      if (name === 'synth/noise') return { globals: { scale: { type: 'float', min: 1, max: 100 } } }
+      return { globals: { aspectLens: { type: 'boolean', default: true }, antialias: { type: 'boolean', default: true } } }
+    },
     formatValue(v) { return String(v) },
     stdEnums: {},
     CanvasRenderer: class {
@@ -62,8 +77,8 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
     fetchCalls.push(url)
     if (url.includes('/api/feed')) return { ok: true, json: async () => ({ total: catalogTotal, compositions: cards }) }
     if (url.includes('/api/front')) return { ok: true, json: async () => ({ hero: frontEmpty ? null : cards[0], thumbnails: frontEmpty ? [] : cards.slice(1) }) }
-    if (url.includes('/api/composition/generative')) return { ok: true, json: async () => ({ dsl: 'search synth, render\nnoise(scale: 10).write(o0)\nrender(o0)', images: [], effects: [] }) }
-    if (url.includes('/api/composition/second')) return { ok: true, json: async () => ({ dsl: 'search synth, render\nnoise(scale: 10).write(o0)\nrender(o0)', images: [], effects: [] }) }
+    if (url.includes('/api/composition/generative')) return { ok: true, json: async () => ({ dsl: program, images: [], effects: [] }) }
+    if (url.includes('/api/composition/second')) return { ok: true, json: async () => ({ dsl: program, images: [], effects: [] }) }
     if (url.includes('/api/composition/image')) return { ok: true, json: async () => ({ dsl: 'search synth, render\nmedia().write(o0)\nrender(o0)', images: imageComposition ? [{ id: 'a'.repeat(64), url: 'https://sharing.noisedeck.app/api/images/x' }] : [], effects: [] }) }
     throw new Error(`The test received an unexpected request: ${url}`)
   }
@@ -293,4 +308,27 @@ test('Remote playback retains local tempo controls and audio response', async ()
   }
   assert.equal(app.engine.renderer.compiled.length, previous + 1)
   assert.equal(app.elements.get('tempo-value').textContent, '120 BPM /8')
+})
+
+
+test('Every lens step disables square aspect while preserving other Boolean settings', async () => {
+  const app = await boot({ lensAspects: [true, null, false], width: 1800, height: 180 })
+  function check(dsl) {
+    const calls = [...dsl.matchAll(/\b(lens|spiral)\(([^)]*)\)/g)]
+    assert.equal(calls.length, 3)
+    for (const [, , args] of calls) {
+      assert.match(args, /aspectLens: false/)
+      assert.match(args, /antialias: false/)
+    }
+    assert.match(dsl, /audio\(band: audioBand\./)
+  }
+  check(app.engine.renderer.compiled.at(-1))
+  const previous = app.engine.renderer.compiled.length
+  app.listeners.get('randomize:click')()
+  const deadline = Date.now() + 1000
+  while (app.engine.renderer.compiled.length === previous && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(app.engine.renderer.compiled.length, previous + 1)
+  check(app.engine.renderer.compiled.at(-1))
 })

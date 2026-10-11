@@ -313,8 +313,13 @@
             await renderer.loadEffects([...new Set(effects.map(effect => effect.effectId).filter(Boolean))])
             await yieldToUi()
             const candidates = []
+            const overrides = {}
             for (const effect of core.extractEffectsFromDsl(original)) {
               const definition = core.getEffect(effect.effectKey)
+              // Use the canvas aspect for every lens, including default settings.
+              if (definition?.globals?.aspectLens?.type === 'boolean') {
+                overrides[effect.stepIndex] = { aspectLens: false }
+              }
               for (const [name, spec] of Object.entries(definition?.globals || {})) {
                 if (!['float', 'int'].includes(spec.type) || spec.define ||
                     spec.ui?.control === false || name.startsWith('_') ||
@@ -325,7 +330,6 @@
             }
             if (!candidates.length) continue
             const compiled = core.compile(original)
-            const overrides = {}
             const count = Math.min(candidates.length, 2 + Math.floor(Math.random() * 3))
             for (let i = 0; i < count; i++) {
               const index = Math.floor(Math.random() * candidates.length)
