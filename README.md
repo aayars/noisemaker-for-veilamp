@@ -95,7 +95,7 @@ The code for a requested public program appears in the URL.
 The plugin does not store logs.
 If a program fails, it calls Veilamp's plugin logging API with the public program code and error.
 If startup fails, it logs the error.
-The plugin does not control retention of service or CDN access logs.
+On Noise Factor's side, we keep basic server logs no longer than 7 days, to aid with troubleshooting.
 
 ## Check
 
