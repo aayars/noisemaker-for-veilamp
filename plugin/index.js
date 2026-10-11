@@ -103,6 +103,7 @@
   let catalogPromise = null
   let randomizing = null
   let currentCode = null
+  let currentDsl = null
   let trackKey = null
   let playbackPlaying = true
   let captionTimer = null
@@ -291,6 +292,7 @@
     randomizing = (async () => {
       button.disabled = true
       setStatus('Randomizing...')
+      let pipelineChanged = false
       try {
         await yieldToUi()
         const all = await getCatalog()
@@ -358,7 +360,10 @@
             })
             if (!/\baudio\s*\(/.test(dsl)) throw new Error('Noisemaker did not add an audio() input.')
             await yieldToUi()
+            renderer.stop()
+            pipelineChanged = true
             await renderer.compile(dsl)
+            currentDsl = dsl
             renderer.start()
             currentCode = item.code
             title.textContent = item.title || composition.title || 'Untitled'
@@ -374,6 +379,16 @@
         }
         throw lastError || new Error('Noisemaker could not load a compatible generative program.')
       } catch (error) {
+        if (pipelineChanged && currentDsl) {
+          try {
+            await renderer.compile(currentDsl)
+            renderer.start()
+          } catch (recoveryError) {
+            setStatus('Noisemaker could not restore the previous program.')
+            veilamp.log('Noisemaker recovery error:', recoveryError)
+            return
+          }
+        }
         setStatus(error.message || 'Noisemaker could not load a program.')
         veilamp.log('Noisemaker error:', error)
       } finally {

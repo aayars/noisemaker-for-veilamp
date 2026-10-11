@@ -7,7 +7,7 @@ import { Script, SyntheticModule, createContext } from 'node:vm'
 
 const entry = new URL('../plugin/index.js', import.meta.url)
 
-async function boot({ imageComposition = false, random = 0, width = 640, height = 360, dpr = 1, playerGranted = true, catalogTotal = 3, frontEmpty = false, lensAspects = null } = {}) {
+async function boot({ imageComposition = false, random = 0, width = 640, height = 360, dpr = 1, playerGranted = true, catalogTotal = 3, frontEmpty = false, lensAspects = null, programDsl = {}, compileHook = null } = {}) {
   const source = await readFile(entry, 'utf8').catch(() => '')
   const manifest = JSON.parse(await readFile(new URL('../plugin/plugin.json', import.meta.url), 'utf8'))
   const listeners = new Map()
@@ -53,12 +53,19 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
     formatValue(v) { return String(v) },
     stdEnums: {},
     CanvasRenderer: class {
-      constructor() { engine.renderer = this; this.manifest = { 'synth/noise': {} }; this.compiled = []; this.frames = [] }
+      constructor() { engine.renderer = this; this.manifest = { 'synth/noise': {} }; this.compiled = []; this.frames = []; this.attempted = [] }
       async loadManifest() {}
       async loadEffects() {}
       setLoopDuration(seconds) { this.loopDuration = seconds }
       setAudioState() { return this.audioState = { spectrum: new Float32Array(128), waveform: new Float32Array(128), setRaw(v) { this.raw = v } } }
-      async compile(dsl) { this.compiled.push(dsl); if (this.started) this.frames.push(dsl); return {} }
+      async compile(dsl) {
+        this.attempted.push(dsl)
+        this.activeDsl = dsl
+        if (this.started) this.frames.push(dsl)
+        if (compileHook) await compileHook(dsl, this)
+        this.compiled.push(dsl)
+        return {}
+      }
       resize() {}
       start() { this.started = true }
       stop() { this.started = false }
@@ -77,8 +84,8 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
     fetchCalls.push(url)
     if (url.includes('/api/feed')) return { ok: true, json: async () => ({ total: catalogTotal, compositions: cards }) }
     if (url.includes('/api/front')) return { ok: true, json: async () => ({ hero: frontEmpty ? null : cards[0], thumbnails: frontEmpty ? [] : cards.slice(1) }) }
-    if (url.includes('/api/composition/generative')) return { ok: true, json: async () => ({ dsl: program, images: [], effects: [] }) }
-    if (url.includes('/api/composition/second')) return { ok: true, json: async () => ({ dsl: program, images: [], effects: [] }) }
+    if (url.includes('/api/composition/generative')) return { ok: true, json: async () => ({ dsl: programDsl.generative ?? program, images: [], effects: [] }) }
+    if (url.includes('/api/composition/second')) return { ok: true, json: async () => ({ dsl: programDsl.second ?? program, images: [], effects: [] }) }
     if (url.includes('/api/composition/image')) return { ok: true, json: async () => ({ dsl: 'search synth, render\nmedia().write(o0)\nrender(o0)', images: imageComposition ? [{ id: 'a'.repeat(64), url: 'https://sharing.noisedeck.app/api/images/x' }] : [], effects: [] }) }
     throw new Error(`The test received an unexpected request: ${url}`)
   }
@@ -331,4 +338,56 @@ test('Every lens step disables square aspect while preserving other Boolean sett
   }
   assert.equal(app.engine.renderer.compiled.length, previous + 1)
   check(app.engine.renderer.compiled.at(-1))
+})
+
+
+async function finishRandomization(app) {
+  const deadline = Date.now() + 1000
+  while (app.elements.get('randomize').disabled && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(app.elements.get('randomize').disabled, false)
+}
+
+const recoveryPrograms = {
+  generative: 'search synth, filter, render\nnoise(scale: 10).lens(aspectLens: false).write(o0)\nrender(o0)',
+  second: 'search synth, filter, render\nnoise(scale: 10).spiral(aspectLens: false).write(o0)\nrender(o0)'
+}
+
+test('A failed candidate compile restores the accepted visual before rendering resumes', async () => {
+  const app = await boot({ programDsl: recoveryPrograms, compileHook(dsl) {
+    if (dsl.includes('.spiral(')) throw new Error('Shader compilation failed.')
+  } })
+  const accepted = app.engine.renderer.activeDsl
+  app.listeners.get('randomize:click')()
+  await finishRandomization(app)
+  assert.equal(app.engine.renderer.activeDsl, accepted)
+  assert.equal(app.engine.renderer.started, true)
+  assert.equal(app.engine.renderer.attempted.length, 3)
+  assert.equal(app.engine.renderer.frames.some(dsl => dsl.includes('.spiral(')), false)
+  assert.equal(app.elements.get('title').textContent, 'Noise')
+  assert.equal(app.elements.get('program-code').textContent, 'generative')
+  assert.equal(app.elements.get('status').textContent, 'Shader compilation failed.')
+})
+
+test('Incompatible candidates leave the accepted visual running without a recovery compile', async () => {
+  const app = await boot({ programDsl: { second: '' } })
+  const accepted = app.engine.renderer.activeDsl
+  app.listeners.get('randomize:click')()
+  await finishRandomization(app)
+  assert.equal(app.engine.renderer.activeDsl, accepted)
+  assert.equal(app.engine.renderer.started, true)
+  assert.equal(app.engine.renderer.attempted.length, 1)
+})
+
+test('A failed recovery keeps rendering stopped and releases the randomizer', async () => {
+  let calls = 0
+  const app = await boot({ programDsl: recoveryPrograms, compileHook() {
+    if (++calls > 1) throw new Error('The renderer is unavailable.')
+  } })
+  app.listeners.get('randomize:click')()
+  await finishRandomization(app)
+  assert.equal(app.engine.renderer.started, false)
+  assert.equal(app.elements.get('status').textContent, 'Noisemaker could not restore the previous program.')
+  assert.equal(app.elements.get('program-code').textContent, 'generative')
 })
