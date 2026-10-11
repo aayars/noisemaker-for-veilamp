@@ -1,5 +1,11 @@
 # Noisemaker for Veilamp
 
+<a href="https://shuffleset.stream/noisedeck/video/misc/misc/noisemaker-for-veilamp-v1_1.mp4">
+  <img src="https://shuffleset.stream/noisedeck/video/misc/misc/poster/noisemaker-for-veilamp-v1_1.mp4" alt="Watch Noisemaker for Veilamp" width="100%">
+</a>
+
+[Watch the video](https://shuffleset.stream/noisedeck/video/misc/misc/noisemaker-for-veilamp-v1_1.mp4)
+
 [MIT License](LICENSE) · [Noise Factor](https://noisefactor.io)
 
 A generative audio visualizer for [Veilamp](https://veilamp.com/).
