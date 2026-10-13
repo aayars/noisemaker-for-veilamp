@@ -6,3 +6,9 @@ node_modules/
 coverage/
 test-results/
 playwright-report/
+
+# Acquired engine, shaders, programs, and generated plugin
+.build/
+dist/
+
+!package-lock.json

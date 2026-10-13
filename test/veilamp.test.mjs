@@ -12,7 +12,7 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
   const manifest = JSON.parse(await readFile(new URL('../plugin/plugin.json', import.meta.url), 'utf8'))
   const listeners = new Map()
   const elements = new Map()
-  for (const id of ['canvas', 'title', 'credit', 'program-code', 'caption', 'status', 'randomize', 'tap-tempo', 'tray-toggle', 'tray', 'divider', 'tempo-value']) {
+  for (const id of ['canvas', 'title', 'credit', 'program-code', 'caption', 'status', 'randomize', 'tap-tempo', 'tray-toggle', 'tray', 'divider', 'tempo-value', 'caption-toggle']) {
     const classes = new Set()
     elements.set(id, {
       textContent: '', disabled: false, hidden: false, value: '',
@@ -80,15 +80,14 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
   let clockNow = 0
   const delayed = new Map()
   let nextTimer = 0
-  const fetch = async url => {
-    fetchCalls.push(url)
-    if (url.includes('/api/feed')) return { ok: true, json: async () => ({ total: catalogTotal, compositions: cards }) }
-    if (url.includes('/api/front')) return { ok: true, json: async () => ({ hero: frontEmpty ? null : cards[0], thumbnails: frontEmpty ? [] : cards.slice(1) }) }
-    if (url.includes('/api/composition/generative')) return { ok: true, json: async () => ({ dsl: programDsl.generative ?? program, images: [], effects: [] }) }
-    if (url.includes('/api/composition/second')) return { ok: true, json: async () => ({ dsl: programDsl.second ?? program, images: [], effects: [] }) }
-    if (url.includes('/api/composition/image')) return { ok: true, json: async () => ({ dsl: 'search synth, render\nmedia().write(o0)\nrender(o0)', images: imageComposition ? [{ id: 'a'.repeat(64), url: 'https://sharing.noisedeck.app/api/images/x' }] : [], effects: [] }) }
-    throw new Error(`The test received an unexpected request: ${url}`)
+  const fetch = async url => { fetchCalls.push(url); throw new Error(`Runtime network request: ${url}`) }
+  const embedded = {
+    core: engine,
+    programs: cards.map(item => ({ ...item, dsl: item.code === 'image' ? 'search synth, render\nmedia().write(o0)\nrender(o0)' : programDsl[item.code] ?? program, images: item.code === 'image' && imageComposition ? [{}] : [], effects: [] })),
+    async initializeRenderer() {},
+    async prepareProgram() {}
   }
+
   const caps = {
     visualizer: manifest.permissions.includes('visualizer'),
     player: playerGranted && manifest.permissions.includes('player')
@@ -106,7 +105,7 @@ async function boot({ imageComposition = false, random = 0, width = 640, height 
   })
   const context = createContext({
     document: { getElementById() { return root } },
-    window: { devicePixelRatio: dpr, addEventListener(name, fn) { listeners.set(`window:${name}`, fn) }, requestAnimationFrame(fn) { return globalThis.setTimeout(fn, 0) } }, veilamp, fetch,
+    window: { NoisemakerEmbedded: embedded, devicePixelRatio: dpr, addEventListener(name, fn) { listeners.set(`window:${name}`, fn) }, requestAnimationFrame(fn) { return globalThis.setTimeout(fn, 0) } }, veilamp, fetch,
     ResizeObserver: class { observe() {} },
     performance: { now: () => clockNow },
     Math: Object.assign(Object.create(Math), { random: () => random }),
@@ -155,11 +154,12 @@ test('Audio bounds stay within the normalized engine range', async () => {
   }
 })
 
-test('The catalog reads each feed page from page zero', async () => {
-  const app = await boot({ catalogTotal: 101, frontEmpty: true })
-  const pages = app.fetchCalls.filter(url => url.includes('/api/feed')).map(url => Number(new URL(url).searchParams.get('page')))
-  assert.deepEqual(pages, [0, 1, 2])
-  assert.equal(app.engine.renderer.started, true)
+test('The bundled catalog makes no runtime network requests', async () => {
+  const app = await boot()
+  assert.deepEqual(app.fetchCalls, [])
+  await app.listeners.get('randomize:click')()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.deepEqual(app.fetchCalls, [])
 })
 
 test('The randomizer shows the loading message immediately', async () => {
@@ -237,9 +237,11 @@ test('Denied playback access leaves audio routing available', async () => {
   assert.equal(app.engine.renderer.audioState.vol, 0.5)
 })
 
-test('The title and program code fade after a short delay', async () => {
+test('Optional title and program code fade after a short delay', async () => {
   const app = await boot()
   assert.equal(app.elements.get('program-code').textContent, 'generative')
+  assert.equal(app.elements.get('caption').classList.contains('is-hidden'), true)
+  app.listeners.get('caption-toggle:click')()
   assert.equal(app.elements.get('caption').classList.contains('is-hidden'), false)
   app.runDelayed()
   assert.equal(app.elements.get('caption').classList.contains('is-hidden'), true)
@@ -390,4 +392,14 @@ test('A failed recovery keeps rendering stopped and releases the randomizer', as
   assert.equal(app.engine.renderer.started, false)
   assert.equal(app.elements.get('status').textContent, 'Noisemaker could not restore the previous program.')
   assert.equal(app.elements.get('program-code').textContent, 'generative')
+})
+
+test('Composition captions are disabled by default and can be turned off', async () => {
+  const app = await boot()
+  assert.equal(app.elements.get('caption-toggle')['aria-pressed'], 'false')
+  assert.equal(app.elements.get('caption').classList.contains('is-hidden'), true)
+  app.listeners.get('caption-toggle:click')()
+  assert.equal(app.elements.get('caption-toggle')['aria-pressed'], 'true')
+  app.listeners.get('caption-toggle:click')()
+  assert.equal(app.elements.get('caption').classList.contains('is-hidden'), true)
 })

@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Noise Factor LLC
 // Veilamp runs this file as a classic script in a sandboxed srcdoc iframe.
-// The file loads the engine and effect bundles from the public Noisemaker CDN.
+// The build embeds the engine, effects, and curated programs in the entry script.
 // The panel receives input. The visualizer permission supplies local audio data.
 (function () {
   'use strict'
 
-  const CDN = 'https://shaders.noisedeck.app/1'
-  const BLASTER = 'https://blaster.noisedeck.app'
+  const embedded = window.NoisemakerEmbedded
   const DIVIDERS = [1, 2, 4, 8, 16]
   const root = document.getElementById('app')
   root.innerHTML = `
@@ -16,7 +15,7 @@
       #app { position:fixed; inset:0; overflow:hidden; }
       #app, #app * { box-sizing:border-box; }
       .nm-stage { position:absolute; inset:0; overflow:hidden;
-        --nm-control-size:min(42px, calc((100vw - 32px) / 3), calc((100vh - 24px) / 2));
+        --nm-control-size:min(42px, calc((100vw - 32px) / 4), calc((100vh - 24px) / 2));
         font:12px/1.3 system-ui,sans-serif; color:#e9f6fa; }
       .nm-stage canvas { position:absolute; inset:0; display:block; width:100%; height:100%; }
       .nm-caption { position:absolute; left:16px; bottom:16px; right:72px; pointer-events:none;
@@ -59,7 +58,7 @@
         .nm-divider { font-size:10px; }
       }
       @media (max-height:150px) {
-        .nm-stage { --nm-control-size:min(32px, calc((100vw - 24px) / 3), max(12px, calc(100vh - 16px))); }
+        .nm-stage { --nm-control-size:min(32px, calc((100vw - 24px) / 4), max(12px, calc(100vh - 16px))); }
         .nm-tray { flex-direction:row; align-items:center; right:calc(var(--nm-control-size) + 12px); bottom:4px;
           max-width:calc(100vw - var(--nm-control-size) - 20px); }
         .nm-tray-info { gap:2px; }
@@ -68,7 +67,7 @@
     <div class="nm-stage">
       <canvas id="canvas" aria-label="Noisemaker visualizer"></canvas>
       <div class="nm-status" id="status" role="status" aria-live="polite"></div>
-      <div class="nm-caption" id="caption"><strong id="title">Noisemaker</strong><small id="credit"></small><code id="program-code"></code></div>
+      <div class="nm-caption is-hidden" id="caption"><strong id="title">Noisemaker</strong><small id="credit"></small><code id="program-code"></code></div>
       <div class="nm-tray" id="tray" hidden>
         <div class="nm-tray-info">
           <div class="nm-tempo-value" id="tempo-value"></div>
@@ -77,6 +76,7 @@
         <button class="nm-action" id="randomize" type="button" aria-label="Randomize the visual program" title="Randomize"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1 .9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2ZM7.5 9A1.5 1.5 0 1 1 9 7.5 1.5 1.5 0 0 1 7.5 9Zm0 9A1.5 1.5 0 1 1 9 16.5 1.5 1.5 0 0 1 7.5 18ZM12 13.5a1.5 1.5 0 1 1 1.5-1.5A1.5 1.5 0 0 1 12 13.5ZM16.5 18a1.5 1.5 0 1 1 1.5-1.5 1.5 1.5 0 0 1-1.5 1.5Zm0-9A1.5 1.5 0 1 1 18 7.5 1.5 1.5 0 0 1 16.5 9Z"/></svg></button>
         <button class="nm-action" id="tap-tempo" type="button" aria-label="Tap tempo" title="Tap tempo"><span class="nm-tap-icon" aria-hidden="true">TAP</span></button>
         <button class="nm-action nm-divider" id="divider" type="button" aria-label="Time divider /4" title="Change time divider">/4</button>
+        <button class="nm-action" id="caption-toggle" type="button" aria-label="Show composition information" aria-pressed="false" title="Show composition information">ⓘ</button>
         </div>
       </div>
       <button class="nm-action nm-handle" id="tray-toggle" type="button" aria-label="Visualizer controls" aria-controls="tray" aria-expanded="false" title="Visualizer controls"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 6h7v2H3V6Zm11 0h7v2h-7V6Zm-3-2h2v6h-2V4ZM3 16h3v2H3v-2Zm7 0h11v2H10v-2Zm-3-2h2v6H7v-6Z"/></svg></button>
@@ -87,6 +87,10 @@
   const credit = root.querySelector('#credit')
   const programCode = root.querySelector('#program-code')
   const caption = root.querySelector('#caption')
+  const captionToggle = root.querySelector('#caption-toggle')
+  let showCaptions = false
+  caption.classList.add('is-hidden')
+  captionToggle.setAttribute('aria-pressed', 'false')
   const status = root.querySelector('#status')
   const button = root.querySelector('#randomize')
   const tapButton = root.querySelector('#tap-tempo')
@@ -100,7 +104,6 @@
   let core = null
   let renderer = null
   let audio = null
-  let catalogPromise = null
   let randomizing = null
   let currentCode = null
   let currentDsl = null
@@ -120,6 +123,7 @@
 
   function showCaption() {
     clearTimeout(captionTimer)
+    if (!showCaptions) { caption.classList.add('is-hidden'); return }
     caption.classList.remove('is-hidden')
     captionTimer = setTimeout(() => caption.classList.add('is-hidden'), 4200)
   }
@@ -259,32 +263,9 @@
     setStatus(`${Math.round(tempoBpm)} BPM /${tempoDivider}`, 2200)
   }
 
-  async function getCatalog() {
-    if (!catalogPromise) catalogPromise = (async () => {
-      const first = await fetch(`${BLASTER}/api/feed?page=0&limit=50`)
-      if (!first.ok) throw new Error(`Noiseblaster returned HTTP ${first.status} for its program list.`)
-      const page = await first.json()
-      const count = Math.ceil((page.total || 0) / 50)
-      const later = await Promise.all(Array.from({ length: Math.max(0, count - 1) }, (_, i) =>
-        fetch(`${BLASTER}/api/feed?page=${i + 1}&limit=50`).then(async response => {
-          if (!response.ok) throw new Error(`Noiseblaster returned HTTP ${response.status} for its program list.`)
-          return (await response.json()).compositions || []
-        })))
-      const front = await fetch(`${BLASTER}/api/front`).then(async response => {
-        if (!response.ok) return []
-        const data = await response.json()
-        return [data.hero, ...(data.thumbnails || [])]
-      }).catch(() => [])
-      const byCode = new Map()
-      for (const item of [...front, ...(page.compositions || []), ...later.flat()]) {
-        if (item?.code && !item.hasEffects && !byCode.has(item.code)) byCode.set(item.code, item)
-      }
-      return [...byCode.values()]
-    })().catch(error => { catalogPromise = null; throw error })
-    return catalogPromise
-  }
+  async function getCatalog() { return embedded.programs }
 
-  // The randomizer selects a Noiseblaster program.
+  // The randomizer selects a bundled curated program.
   // It replaces numeric parameters with Noisemaker audio() inputs.
   // It then loads the modified program.
   async function randomize() {
@@ -303,12 +284,11 @@
         for (let attempt = 0; attempt < attempts; attempt++) {
           const item = pool.splice(Math.floor(Math.random() * pool.length), 1)[0]
           try {
-            const response = await fetch(`${BLASTER}/api/composition/${encodeURIComponent(item.code)}?images=files`)
-            if (!response.ok) throw new Error(`Noiseblaster returned HTTP ${response.status} for a program.`)
-            const composition = await response.json()
+            const composition = item
+            await embedded.prepareProgram(renderer, composition)
             const original = composition.dsl
             if (typeof original !== 'string' || !original ||
-                composition.images?.length || composition.effects?.length ||
+                composition.images?.length ||
                 /\b(?:media|camera|video|midi)\s*\(/i.test(original)) continue
 
             const effects = core.extractEffectNamesFromDsl(original, renderer.manifest)
@@ -367,7 +347,7 @@
             renderer.start()
             currentCode = item.code
             title.textContent = item.title || composition.title || 'Untitled'
-            credit.textContent = `by ${creatorName(item.username)}`
+            credit.textContent = `by ${item.author || creatorName(item.username)}`
             programCode.textContent = item.code
             showCaption()
             setStatus('')
@@ -402,6 +382,11 @@
   tapButton.addEventListener('click', tapTempo)
   dividerButton.addEventListener('click', setDivider)
   trayToggle.addEventListener('click', toggleTray)
+  captionToggle.addEventListener('click', () => {
+    showCaptions = !showCaptions
+    captionToggle.setAttribute('aria-pressed', String(showCaptions))
+    showCaption()
+  })
   window.addEventListener('keydown', event => {
     if (event.key?.toLowerCase() === 'r' && !event.repeat) void randomize()
     if (event.key?.toLowerCase() === 't' && !event.repeat) tapTempo()
@@ -424,15 +409,16 @@
     })
     try {
       setStatus('Noisemaker is loading.')
-      core = await import(`${CDN}/noisemaker-shaders-core.esm.min.js`)
+      if (!embedded) throw new Error('Build the plugin with npm run build before importing it.')
+      core = embedded.core
       resize()
       renderer = new core.CanvasRenderer({
         canvas, width: canvas.width, height: canvas.height,
-        basePath: CDN, bundlePath: `${CDN}/effects`, useBundles: true,
+        useBundles: true,
         preferWebGPU: false,
         onError: error => { setStatus(error.message || String(error)) }
       })
-      await renderer.loadManifest()
+      await embedded.initializeRenderer(renderer)
       applyTempo()
       audio = renderer.setAudioState()
       if (typeof ResizeObserver !== 'undefined') new ResizeObserver(resize).observe(canvas)

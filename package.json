@@ -16,6 +16,13 @@
   },
   "scripts": {
     "test": "node --experimental-vm-modules --test test/*.test.mjs",
-    "check": "node --check plugin/index.js && node --check test/veilamp.test.mjs"
+    "check": "node --check plugin/index.js && node --check test/veilamp.test.mjs && node --check scripts/build.mjs",
+    "build": "node scripts/build.mjs",
+    "test:render": "node test/offline-render.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "playwright": "^1.64.0",
+    "pngjs": "^7.0.0"
   }
 }
