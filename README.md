@@ -180,8 +180,6 @@ The canvas uses half its normal pixel density when its width or height exceeds 1
 
 ## Programs and audio
 
-The plugin renders visuals locally.
-
 The randomizer selects a generative program from the bundled curated collection.
 The build includes custom shader definitions where required.
 The build rejects programs that require images, media, camera, video, or MIDI.
